@@ -1,35 +1,31 @@
 import json
-from typing import Dict
-import sys
-from argparse import Namespace
-
 import numpy as np
+from typing import Dict, Any, List
 
 from agent import Agent
-# from lux.config import EnvConfig
 from lux.kit import from_json
+from observation import Observation
+
 ### DO NOT REMOVE THE FOLLOWING CODE ###
-agent_dict = dict() # store potentially multiple dictionaries as kaggle imports code directly
-agent_prev_obs = dict()
-def agent_fn(observation, configurations):
+agent_dict: Dict[str, Agent] = dict()  # store potentially multiple dictionaries as kaggle imports code directly
+agent_prev_obs: Dict[str, Any] = dict()
+
+def agent_fn(observation: Observation, configurations: Dict[str, Any]) -> Dict[str, List[int]]:
     """
     agent definition for kaggle submission.
     """
     global agent_dict
-    obs = observation.obs
-    if type(obs) == str:
-        obs = json.loads(obs)
-    step = observation.step
-    player = observation.player
-    remainingOverageTime = observation.remainingOverageTime
+    step: int = observation.step
+    player: str = observation.player
+    remainingOverageTime: int = observation.remainingOverageTime
     if step == 0:
         agent_dict[player] = Agent(player, configurations["env_cfg"])
-    agent = agent_dict[player]
-    actions = agent.act(step, from_json(obs), remainingOverageTime)
+    agent: Agent = agent_dict[player]
+    actions: np.ndarray = agent.act(step, observation, remainingOverageTime)
     return dict(action=actions.tolist())
+
 if __name__ == "__main__":
-    
-    def read_input():
+    def read_input() -> str:
         """
         Reads input from stdin
         """
@@ -37,18 +33,21 @@ if __name__ == "__main__":
             return input()
         except EOFError as eof:
             raise SystemExit(eof)
-    step = 0
-    player_id = 0
-    env_cfg = None
-    i = 0
+
+    step: int = 0
+    player_id: int = 0
+    env_cfg: Dict[str, Any]
+    i: int = 0
+
     while True:
-        inputs = read_input()
-        raw_input = json.loads(inputs)
-        observation = Namespace(**dict(step=raw_input["step"], obs=raw_input["obs"], remainingOverageTime=raw_input["remainingOverageTime"], player=raw_input["player"], info=raw_input["info"]))
+        inputs: str = read_input()
+        raw_input: Dict[str, Any] = json.loads(inputs)
+        observation: Observation = Observation.from_dict(raw_input)
+
         if i == 0:
             env_cfg = raw_input["info"]["env_cfg"]
             player_id = raw_input["player"]
         i += 1
-        actions = agent_fn(observation, dict(env_cfg=env_cfg))
+        actions: Dict[str, List[int]] = agent_fn(observation, dict(env_cfg=env_cfg))
         # send actions to engine
         print(json.dumps(actions))
