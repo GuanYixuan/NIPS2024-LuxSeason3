@@ -35,19 +35,19 @@ if __name__ == "__main__":
             raise SystemExit(eof)
 
     step: int = 0
-    player_id: int = 0
+    player_id: str
     env_cfg: Dict[str, Any]
     i: int = 0
 
     while True:
         inputs: str = read_input()
         raw_input: Dict[str, Any] = json.loads(inputs)
-        observation: Observation = Observation.from_dict(raw_input)
 
         if i == 0:
             env_cfg = raw_input["info"]["env_cfg"]
             player_id = raw_input["player"]
         i += 1
+        observation = Observation(raw_input["step"], player_id, raw_input["remainingOverageTime"], raw_input["obs"], raw_input["info"])
         actions: Dict[str, List[int]] = agent_fn(observation, dict(env_cfg=env_cfg))
         # send actions to engine
         print(json.dumps(actions))

@@ -21,7 +21,7 @@ class Agent():
         step is the current timestep number of the game starting from 0 going up to max_steps_in_match * match_count_per_episode - 1.
         """
         unit_mask = obs.units_mask[self.team_id]  # shape (max_units, )
-        unit_positions = obs.units_positions[self.team_id]  # shape (max_units, 2)
+        unit_positions = obs.units_position[self.team_id]  # shape (max_units, 2)
         unit_energys = obs.units_energy[self.team_id]  # shape (max_units, 1)
         observed_relic_node_positions = obs.relic_nodes  # shape (max_relic_nodes, 2)
         observed_relic_nodes_mask = obs.relic_nodes_mask  # shape (max_relic_nodes, )
