@@ -76,13 +76,12 @@ class Map:
         def heuristic(pos: np.ndarray) -> float:
             return np.abs(pos[0] - dst[0]) + np.abs(pos[1] - dst[1])
 
-        # 定义方向数组：中心、上、右、下、左
+        # 注意：方向的索引比游戏中的方向值小1，因为去掉了中心方向
         DIRECTIONS = np.array([
-            [0, 0],   # 中心
-            [0, -1],  # 上
-            [1, 0],   # 右
-            [0, 1],   # 下
-            [-1, 0],  # 左
+            [0, -1],  # 上  (游戏方向值1)
+            [1, 0],   # 右  (游戏方向值2)
+            [0, 1],   # 下  (游戏方向值3)
+            [-1, 0],  # 左  (游戏方向值4)
         ])
 
         # 初始化数组
@@ -90,33 +89,35 @@ class Map:
         g_scores = np.full((self.MAP_SIZE, self.MAP_SIZE), np.inf)
         g_scores[src[0], src[1]] = 0
 
+        # 使用-1初始化came_from数组，表示未访问
+        came_from = np.full((self.MAP_SIZE, self.MAP_SIZE, 2), -1, dtype=np.int16)
+        came_from[src[0], src[1]] = src  # 起点的父节点是自己
+
         start: Tuple[int, int] = tuple(src)
-        open_queue = [(heuristic(src), 0, start, start)]  # (f_score, g_score, current, parent)
+        open_queue = [(heuristic(src), 0, start)]  # (f_score, g_score, current)
         heapq.heapify(open_queue)
-        came_from = {}
 
         while open_queue:
             # 获取f_score最小的节点
-            f_score, g_score, current, parent = heapq.heappop(open_queue)
+            f_score, g_score, current = heapq.heappop(open_queue)
             current_pos = np.array(current)
 
             # 使用数组索引检查节点是否已访问
             if closed_array[current_pos[0], current_pos[1]]:
                 continue
 
-            came_from[current] = parent
-
             if np.array_equal(current_pos, dst):
                 # 回溯找到第一步
-                while tuple(src) != current:
-                    prev = came_from[current]
-                    if tuple(src) == prev:
+                current_pos = dst
+                while not np.array_equal(current_pos, src):
+                    parent_pos = came_from[current_pos[0], current_pos[1]]
+                    if np.array_equal(parent_pos, src):
                         # 返回对应的方向索引
-                        diff = np.array(current) - src
+                        diff = current_pos - src
                         for i, d in enumerate(DIRECTIONS):
                             if np.array_equal(diff, d):
-                                return i
-                    current = prev
+                                return i + 1  # 加1转换为游戏中的方向值
+                    current_pos = parent_pos
                 return 0
 
             # 标记当前节点为已访问
@@ -145,7 +146,8 @@ class Map:
                     neighbor_tuple = tuple(neighbor)
                     g_scores[neighbor[0], neighbor[1]] = tentative_g_score
                     f_score = tentative_g_score + heuristic(neighbor)
-                    heapq.heappush(open_queue, (f_score, tentative_g_score, neighbor_tuple, current))
+                    came_from[neighbor[0], neighbor[1]] = current_pos
+                    heapq.heappush(open_queue, (f_score, tentative_g_score, neighbor_tuple))
 
         # 如果没有找到路径，返回朝向目标的简单方向
         dx = dst[0] - src[0]
