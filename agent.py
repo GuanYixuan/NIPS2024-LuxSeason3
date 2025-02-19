@@ -1,5 +1,6 @@
-from lux.utils import direction_to
+import sys
 import numpy as np
+from lux.utils import direction_to
 
 from map import Map
 from observation import Observation
@@ -78,11 +79,11 @@ class Agent():
                     actions[unit_id] = [random_direction, 0, 0]
                 else:
                     # otherwise we want to move towards the relic node
-                    actions[unit_id] = [direction_to(unit_pos, nearest_relic_node_position), 0, 0]
+                    actions[unit_id] = [self.game_map.direction_to(unit_pos, nearest_relic_node_position), 0, 0]
             else:
                 # randomly explore by picking a random location on the map and moving there for about 20 steps
                 if step % 20 == 0 or unit_id not in self.unit_explore_locations:
                     rand_loc = (np.random.randint(0, self.env_cfg["map_width"]), np.random.randint(0, self.env_cfg["map_height"]))
                     self.unit_explore_locations[unit_id] = rand_loc
-                actions[unit_id] = [direction_to(unit_pos, self.unit_explore_locations[unit_id]), 0, 0]
+                actions[unit_id] = [self.game_map.direction_to(unit_pos, self.unit_explore_locations[unit_id]), 0, 0]
         return actions
