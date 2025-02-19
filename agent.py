@@ -1,9 +1,21 @@
 from lux.utils import direction_to
 import numpy as np
+
+from map import Map
 from observation import Observation
 
+from typing import Dict, Any
+
 class Agent():
-    def __init__(self, player: str, env_cfg) -> None:
+
+    player: str
+    opp_player: str
+    team_id: int
+    opp_team_id: int
+
+    game_map: Map
+
+    def __init__(self, player: str, env_cfg: Dict[str, Any], obs: Observation) -> None:
         self.player = player
         self.opp_player = "player_1" if self.player == "player_0" else "player_0"
         self.team_id = 0 if self.player == "player_0" else 1
@@ -15,11 +27,17 @@ class Agent():
         self.discovered_relic_nodes_ids = set()
         self.unit_explore_locations = dict()
 
+        self.game_map = Map(obs)
+
     def act(self, step: int, obs: Observation, remainingOverageTime: int = 60):
         """implement this function to decide what actions to send to each available unit.
 
         step is the current timestep number of the game starting from 0 going up to max_steps_in_match * match_count_per_episode - 1.
         """
+
+        # update map with new observation
+        self.game_map.update_map(obs)
+
         unit_mask = obs.units_mask[self.team_id]  # shape (max_units, )
         unit_positions = obs.units_position[self.team_id]  # shape (max_units, 2)
         unit_energys = obs.units_energy[self.team_id]  # shape (max_units, 1)

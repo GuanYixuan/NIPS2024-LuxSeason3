@@ -19,7 +19,7 @@ def agent_fn(observation: Observation, configurations: Dict[str, Any]) -> Dict[s
     player: str = observation.player
     remainingOverageTime: int = observation.remainingOverageTime
     if step == 0:
-        agent_dict[player] = Agent(player, configurations["env_cfg"])
+        agent_dict[player] = Agent(player, configurations["env_cfg"], observation)
     agent: Agent = agent_dict[player]
     actions: np.ndarray = agent.act(step, observation, remainingOverageTime)
     return dict(action=actions.tolist())
