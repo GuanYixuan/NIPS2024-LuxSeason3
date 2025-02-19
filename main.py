@@ -1,20 +1,24 @@
 import json
+import sys
 import numpy as np
+from argparse import Namespace
 from typing import Dict, Any, List
 
 from agent import Agent
-from lux.kit import from_json
 from observation import Observation
 
 ### DO NOT REMOVE THE FOLLOWING CODE ###
 agent_dict: Dict[str, Agent] = dict()  # store potentially multiple dictionaries as kaggle imports code directly
 agent_prev_obs: Dict[str, Any] = dict()
 
-def agent_fn(observation: Observation, configurations: Dict[str, Any]) -> Dict[str, List[int]]:
+def agent_fn(obs: Namespace, configurations: Dict[str, Any]) -> Dict[str, List[int]]:
     """
     agent definition for kaggle submission.
     """
     global agent_dict
+
+    observation = Observation(obs.step, obs.player, obs.remainingOverageTime, obs.obs)
+
     step: int = observation.step
     player: str = observation.player
     remainingOverageTime: int = observation.remainingOverageTime
@@ -25,6 +29,7 @@ def agent_fn(observation: Observation, configurations: Dict[str, Any]) -> Dict[s
     return dict(action=actions.tolist())
 
 if __name__ == "__main__":
+    print("Starting agent...", file=sys.stderr)
     def read_input() -> str:
         """
         Reads input from stdin
@@ -40,14 +45,13 @@ if __name__ == "__main__":
     i: int = 0
 
     while True:
-        inputs: str = read_input()
+        inputs = read_input()
         raw_input: Dict[str, Any] = json.loads(inputs)
-
+        observation = Namespace(**dict(step=raw_input["step"], obs=raw_input["obs"], remainingOverageTime=raw_input["remainingOverageTime"], player=raw_input["player"], info=raw_input["info"]))
         if i == 0:
             env_cfg = raw_input["info"]["env_cfg"]
             player_id = raw_input["player"]
         i += 1
-        observation = Observation(raw_input["step"], player_id, raw_input["remainingOverageTime"], raw_input["obs"], raw_input["info"])
-        actions: Dict[str, List[int]] = agent_fn(observation, dict(env_cfg=env_cfg))
+        actions = agent_fn(observation, dict(env_cfg=env_cfg))
         # send actions to engine
         print(json.dumps(actions))

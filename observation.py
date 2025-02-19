@@ -1,6 +1,7 @@
-from typing import Dict, Any
+import json
 import numpy as np
-from dataclasses import dataclass
+
+from typing import Union, Dict, Any
 
 """
 Explanations for obs dictionary:
@@ -38,7 +39,6 @@ Explanations for obs dictionary:
 }
 """
 
-@dataclass
 class Observation:
     """游戏观察状态类
 
@@ -60,7 +60,6 @@ class Observation:
     step: int  # 当前时间步，从0开始
     player: str  # 玩家ID，"player_0" 或 "player_1"
     remainingOverageTime: int  # 剩余的超时时间
-    info: Dict[str, Any]  # 环境配置信息
 
     # 从obs中提取的字段
     units_position: np.ndarray
@@ -77,7 +76,7 @@ class Observation:
     match_steps: int
 
     def __init__(self, step: int, player: str, remainingOverageTime: int,
-                 obs: Dict[str, Any], info: Dict[str, Any]):
+                 obs: Union[Dict[str, Any], str]):
         """从原始数据初始化观察状态
 
         Args:
@@ -85,12 +84,14 @@ class Observation:
             player: 玩家ID
             remainingOverageTime: 剩余超时时间
             obs: 观察状态字典
-            info: 环境配置信息
         """
         self.step = step
         self.player = player
         self.remainingOverageTime = remainingOverageTime
-        self.info = info
+
+        if isinstance(obs, str):
+            obs = json.loads(obs)
+        assert isinstance(obs, dict), f"obs should be a dict or a json string, not {type(obs)}"
 
         # 提取obs中的字段
         self.units_position = np.array(obs["units"]["position"])
@@ -105,3 +106,6 @@ class Observation:
         self.team_wins = np.array(obs["team_wins"])
         self.steps = obs["steps"]
         self.match_steps = obs["match_steps"]
+
+        # 根据地图对称性处理某些字段
+        self.map_tile_type = np.maximum(self.map_tile_type, np.rot90(np.rot90(self.map_tile_type).T, -1))
