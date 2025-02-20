@@ -23,6 +23,8 @@ class Constants:
 
     MAP_SIZE = 24
     """游戏地图大小"""
+    MAX_UNITS = 16
+    """最大单位数量"""
 
     DEFAULT_ENERGY_VALUE = 0
     """默认的能量未知值"""

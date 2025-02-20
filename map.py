@@ -86,18 +86,6 @@ class Map:
             # print(f"Energy map updated at step {obs.step}:\n", self.energy_map.T, file=sys.stderr)
             self.energy_map = obs.map_energy.copy()  # 目前直接更新能量地图
 
-        # 估计移动开销
-        if not self.move_cost_estimated:
-            # 第一个单位刚刚离开原点
-            if obs.units_mask[obs.player_id, 0]:
-                u0_pos = obs.units_position[obs.player_id, 0]
-                if not np.array_equal(u0_pos, np.full(2, 0 if obs.player_id == 0 else C.MAP_SIZE - 1)):
-                    self.move_cost = C.INIT_UNIT_ENERGY - obs.units_energy[obs.player_id, 0] + self.energy_map[tuple(u0_pos)]
-                    self.move_cost_estimated = True
-                    print(f"Move cost estimated, cost: {self.move_cost}", file=sys.stderr)
-
-        # TODO: 估计星云能量损耗
-
     def direction_to(self, src: np.ndarray, dst: np.ndarray, energy_weight: float) -> int:
         """利用A*算法计算从src到dst的下一步方向"""
         if np.array_equal(src, dst):
@@ -157,6 +145,7 @@ class Map:
             # 检查所有可能的移动方向
             for i, d in enumerate(DIRECTIONS):
                 neighbor = current_pos + d
+                next_pos = tuple(neighbor)
 
                 # 检查是否越界
                 if (neighbor[0] < 0 or neighbor[0] >= C.MAP_SIZE or
@@ -164,21 +153,22 @@ class Map:
                     continue
 
                 # 检查是否是障碍物
-                if self.obstacle_map[neighbor[0], neighbor[1]] == Landscape.ASTEROID.value:
+                landscape = self.obstacle_map[next_pos]
+                if landscape == Landscape.ASTEROID.value:
                     continue
 
                 # 使用数组索引检查节点是否已访问
-                if closed_array[neighbor[0], neighbor[1]]:
+                if closed_array[next_pos]:
                     continue
 
-                tentative_g_score: float = g_score + max(0, 1 - self.energy_map[tuple(neighbor)] * energy_weight)  # type: ignore
+                move_cost = 1 + (self.nebula_cost if landscape == Landscape.NEBULA.value else 0) / self.move_cost
+                tentative_g_score: float = g_score + max(0, move_cost - self.energy_map[next_pos] * energy_weight)  # type: ignore
 
-                if tentative_g_score < g_scores[neighbor[0], neighbor[1]]:
-                    neighbor_tuple = tuple(neighbor)
-                    g_scores[neighbor[0], neighbor[1]] = tentative_g_score
+                if tentative_g_score < g_scores[next_pos]:
+                    g_scores[next_pos] = tentative_g_score
                     f_score = tentative_g_score + heuristic(neighbor) * 0.3  # heuristic量纲为1
-                    came_from[neighbor[0], neighbor[1]] = current_pos
-                    heapq.heappush(open_queue, (f_score, tentative_g_score, neighbor_tuple))
+                    came_from[next_pos] = current_pos
+                    heapq.heappush(open_queue, (f_score, tentative_g_score, next_pos))
 
         # 如果没有找到路径，返回朝向目标的简单方向
         dx = dst[0] - src[0]

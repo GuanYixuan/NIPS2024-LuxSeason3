@@ -1,11 +1,11 @@
 import sys
 import numpy as np
-from lux.utils import direction_to
 
-from map import Map
+from map import Map, Landscape
+from utils import Constants as C
 from observation import Observation
 
-from typing import Dict, Any
+from typing import Dict, List, Any
 
 class Agent():
 
@@ -13,8 +13,14 @@ class Agent():
     opp_player: str
     team_id: int
     opp_team_id: int
+    env_cfg: Dict[str, Any]
 
     game_map: Map
+
+    history: List[Observation]
+    """历史观测结果, 保存至**上一个回合**"""
+    obs: Observation
+    """当前观测结果"""
 
     def __init__(self, player: str, env_cfg: Dict[str, Any], obs: Observation) -> None:
         self.player = player
@@ -29,15 +35,19 @@ class Agent():
         self.unit_explore_locations = dict()
 
         self.game_map = Map(obs)
+        self.history = []
 
-    def act(self, step: int, obs: Observation, remainingOverageTime: int = 60):
+    def act(self, step: int, obs: Observation, remainingOverageTime: int = 60) -> np.ndarray:
         """implement this function to decide what actions to send to each available unit.
 
         step is the current timestep number of the game starting from 0 going up to max_steps_in_match * match_count_per_episode - 1.
         """
 
+        self.obs = obs
+
         # update map with new observation
         self.game_map.update_map(obs)
+        self.estimate_params()
 
         unit_mask = obs.units_mask[self.team_id]  # shape (max_units, )
         unit_positions = obs.units_position[self.team_id]  # shape (max_units, 2)
@@ -89,7 +99,45 @@ class Agent():
                     rand_loc = (np.random.randint(0, self.env_cfg["map_width"]), np.random.randint(0, self.env_cfg["map_height"]))
                     self.unit_explore_locations[unit_id] = rand_loc
                 actions[unit_id] = [self.game_map.direction_to(unit_pos, self.unit_explore_locations[unit_id], energy_weight), 0, 0]
+
+        # save the current observation for the next step
+        self.history.append(obs)
         return actions
+
+    def estimate_params(self) -> None:
+        """估计移动成本、星云能量损耗等参数"""
+        if not len(self.history):
+            return
+
+        gmap = self.game_map
+        last_obs = self.history[-1]
+        # 估计移动开销
+        if not gmap.move_cost_estimated:
+            # 任意一个单位移动了, 但没有移动到星云上
+            for i in range(C.MAX_UNITS):
+                unit_sel = (self.team_id, i)
+                if last_obs.units_mask[unit_sel] and self.obs.units_mask[unit_sel]:
+                    last_pos = last_obs.units_position[unit_sel]
+                    curr_pos = self.obs.units_position[unit_sel]
+                    if not np.array_equal(last_pos, curr_pos) and gmap.obstacle_map[tuple(curr_pos)] != Landscape.NEBULA.value:
+                        gmap.move_cost = last_obs.units_energy[unit_sel] - self.obs.units_energy[unit_sel] \
+                            + gmap.energy_map[tuple(curr_pos)]
+                        gmap.move_cost_estimated = True
+                        print(f"Move cost estimated, cost: {gmap.move_cost}", file=sys.stderr)
+
+        # 估计移动开销后, 估计星云能量损耗
+        elif not gmap.nebula_cost_estimated:
+            # 任意一个单位移动到了星云上
+            for i in range(C.MAX_UNITS):
+                unit_sel = (self.team_id, i)
+                if last_obs.units_mask[unit_sel] and self.obs.units_mask[unit_sel]:
+                    last_pos = last_obs.units_position[unit_sel]
+                    curr_pos = self.obs.units_position[unit_sel]
+                    if not np.array_equal(last_pos, curr_pos) and gmap.obstacle_map[tuple(curr_pos)] == Landscape.NEBULA.value:
+                        gmap.nebula_cost = last_obs.units_energy[unit_sel] - self.obs.units_energy[unit_sel] \
+                            + gmap.energy_map[tuple(curr_pos)] - gmap.move_cost
+                        gmap.nebula_cost_estimated = True
+                        print(f"Nebula cost estimated, cost: {gmap.nebula_cost}", file=sys.stderr)
 
     @staticmethod
     def energy_weight_fn(energy: int, move_cost: int) -> float:
