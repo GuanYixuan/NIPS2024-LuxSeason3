@@ -1,6 +1,9 @@
 import json
 import numpy as np
 
+from utils import Constants
+from utils import flip_matrix
+
 from typing import Union, Dict, Any
 
 """
@@ -66,14 +69,20 @@ class Observation:
     units_energy: np.ndarray
     units_mask: np.ndarray
     sensor_mask: np.ndarray
+    """地图上的可见区域"""
     map_energy: np.ndarray
+    """地图能量分布, 有效范围为`sym_sensor_mask"""
     map_tile_type: np.ndarray
+    """地图格类型, 有效范围为`sym_sensor_mask`"""
     relic_nodes: np.ndarray
     relic_nodes_mask: np.ndarray
     team_points: np.ndarray
     team_wins: np.ndarray
     steps: int
     match_steps: int
+
+    sym_sensor_mask: np.ndarray
+    """补充了对称部分的sensor_mask"""
 
     def __init__(self, step: int, player: str, remainingOverageTime: int,
                  obs: Union[Dict[str, Any], str]):
@@ -107,5 +116,11 @@ class Observation:
         self.steps = obs["steps"]
         self.match_steps = obs["match_steps"]
 
+        self.sym_sensor_mask = np.logical_or(self.sensor_mask, flip_matrix(self.sensor_mask))
+
         # 根据地图对称性处理某些字段
-        self.map_tile_type = np.maximum(self.map_tile_type, np.rot90(np.rot90(self.map_tile_type).T, -1))
+        self.map_tile_type = np.maximum(self.map_tile_type, flip_matrix(self.map_tile_type))
+
+        mask_flipped = flip_matrix(self.sensor_mask)
+        self.map_energy[~self.sensor_mask] = Constants.DEFAULT_ENERGY_VALUE
+        self.map_energy[mask_flipped] = flip_matrix(self.map_energy)[mask_flipped]

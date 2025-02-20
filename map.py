@@ -3,6 +3,7 @@ import heapq
 import numpy as np
 from enum import Enum
 
+from utils import Constants as C
 from utils import _NDArray, Shape
 from observation import Observation
 
@@ -18,9 +19,10 @@ class Landscape(Enum):
 class Map:
     """地图类, 处理寻路、障碍移动估计等"""
 
-    MAP_SIZE: int = 24
     obstacle_map: _NDArray[Shape["(MAP_SIZE, MAP_SIZE)"], np.int8]
+    """障碍地图, 数值依照Landscape枚举设置"""
     energy_map: _NDArray[Shape["(MAP_SIZE, MAP_SIZE)"], np.int8]
+    """能量地图, 未知值设为0"""
 
     nebula_drift_estimated: bool = False
     nebula_drift_speed: float = -1
@@ -29,15 +31,16 @@ class Map:
     def __init__(self, obs: Observation) -> None:
         """初始化地图"""
         self.obstacle_map = obs.map_tile_type.copy()
+        self.energy_map = obs.map_energy.copy()
 
-        assert self.MAP_SIZE == obs.map_tile_type.shape[0] == obs.map_tile_type.shape[1]
+        assert C.MAP_SIZE == obs.map_tile_type.shape[0] == obs.map_tile_type.shape[1]
 
     def update_map(self, obs: Observation) -> None:
         """更新地图状态"""
 
         # 更新障碍地图
         last_visible_mask = (self.obstacle_map != Landscape.UNKNOWN.value)
-        both_visible_mask = np.logical_and(last_visible_mask, obs.sensor_mask)
+        both_visible_mask = np.logical_and(last_visible_mask, obs.sym_sensor_mask)
 
         unmoved: bool = np.array_equal(self.obstacle_map[both_visible_mask], obs.map_tile_type[both_visible_mask])
         if unmoved:
@@ -46,14 +49,14 @@ class Map:
             # 障碍移动估计
             if not self.nebula_drift_estimated:
                 hypo_map = np.roll(self.obstacle_map, (1, -1), (0, 1))
-                both_visible_mask = np.logical_and(hypo_map != Landscape.UNKNOWN.value, obs.sensor_mask)
+                both_visible_mask = np.logical_and(hypo_map != Landscape.UNKNOWN.value, obs.sym_sensor_mask)
                 if np.array_equal(hypo_map[both_visible_mask], obs.map_tile_type[both_visible_mask]):
                     self.nebula_drift_direction = 1
                 else:
                     self.nebula_drift_direction = -1
                     # Assert
                     hypo_map = np.roll(self.obstacle_map, (-1, 1), (0, 1))
-                    both_visible_mask = np.logical_and(hypo_map != Landscape.UNKNOWN.value, obs.sensor_mask)
+                    both_visible_mask = np.logical_and(hypo_map != Landscape.UNKNOWN.value, obs.sym_sensor_mask)
                     assert np.array_equal(hypo_map[both_visible_mask], obs.map_tile_type[both_visible_mask])
 
                 self.nebula_drift_speed = 1 / (obs.step - 1)
@@ -65,7 +68,16 @@ class Map:
                 rolled_map = np.roll(self.obstacle_map, np.array((1, -1)) * self.nebula_drift_direction, (0, 1))
                 self.obstacle_map = np.maximum(rolled_map, obs.map_tile_type)  # type: ignore
 
-        # TODO: 更新能量地图
+        # 更新能量地图
+        last_visible_mask = (self.energy_map != C.DEFAULT_ENERGY_VALUE)
+        both_visible_mask = np.logical_and(last_visible_mask, obs.sym_sensor_mask)
+        unmoved = np.array_equal(self.energy_map[both_visible_mask], obs.map_energy[both_visible_mask])
+        if unmoved:
+            self.energy_map[obs.sym_sensor_mask] = obs.map_energy[obs.sym_sensor_mask]
+        else:
+            # print(f"Energy map updated at step {obs.step}:\n", self.energy_map.T, file=sys.stderr)
+            self.energy_map = obs.map_energy.copy()  # 目前直接更新能量地图
+
 
     def direction_to(self, src: np.ndarray, dst: np.ndarray) -> int:
         """利用A*算法计算从src到dst的下一步方向"""
@@ -85,12 +97,12 @@ class Map:
         ])
 
         # 初始化数组
-        closed_array = np.zeros((self.MAP_SIZE, self.MAP_SIZE), dtype=bool)
-        g_scores = np.full((self.MAP_SIZE, self.MAP_SIZE), np.inf)
+        closed_array = np.zeros((C.MAP_SIZE, C.MAP_SIZE), dtype=bool)
+        g_scores = np.full((C.MAP_SIZE, C.MAP_SIZE), np.inf)
         g_scores[src[0], src[1]] = 0
 
         # 使用-1初始化came_from数组，表示未访问
-        came_from = np.full((self.MAP_SIZE, self.MAP_SIZE, 2), -1, dtype=np.int16)
+        came_from = np.full((C.MAP_SIZE, C.MAP_SIZE, 2), -1, dtype=np.int16)
         came_from[src[0], src[1]] = src  # 起点的父节点是自己
 
         start: Tuple[int, int] = tuple(src)
@@ -128,8 +140,8 @@ class Map:
                 neighbor = current_pos + d
 
                 # 检查是否越界
-                if (neighbor[0] < 0 or neighbor[0] >= self.MAP_SIZE or
-                    neighbor[1] < 0 or neighbor[1] >= self.MAP_SIZE):
+                if (neighbor[0] < 0 or neighbor[0] >= C.MAP_SIZE or
+                    neighbor[1] < 0 or neighbor[1] >= C.MAP_SIZE):
                     continue
 
                 # 检查是否是障碍物
