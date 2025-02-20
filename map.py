@@ -3,6 +3,7 @@ import heapq
 import numpy as np
 from enum import Enum
 
+from logger import Logger
 from utils import Constants as C
 from utils import _NDArray, Shape
 from observation import Observation
@@ -35,6 +36,8 @@ class Map:
     nebula_drift_estimated: bool = False
     nebula_drift_speed: float = -1
     nebula_drift_direction: int = -1
+
+    logger: Logger = Logger()
 
     def __init__(self, obs: Observation) -> None:
         """初始化地图"""
@@ -88,20 +91,38 @@ class Map:
 
     def direction_to(self, src: np.ndarray, dst: np.ndarray, energy_weight: float) -> int:
         """利用A*算法计算从src到dst的下一步方向"""
+        src = np.array(src)
+        dst = np.array(dst)
+
+        # 如果目标是障碍物, 寻找最近的可达邻格作为新目标
+        if self.obstacle_map[tuple(dst)] == Landscape.ASTEROID.value:
+            # 找出相邻格
+            neighbors = dst + C.DIRECTIONS
+            valid_mask = np.all((neighbors >= 0) & (neighbors < C.MAP_SIZE), axis=1)
+            valid_neighbors = neighbors[valid_mask]
+
+            # 找出可达邻格
+            reachable_mask = np.array([
+                self.obstacle_map[tuple(n)] != Landscape.ASTEROID.value
+                for n in valid_neighbors
+            ])
+            # 计算到src的曼哈顿距离
+            distances = np.abs(valid_neighbors - src).sum(axis=1)
+
+            if reachable_mask.any():
+                # 在可达邻格中选择距离最近的作为新目标
+                reachable_neighbors = valid_neighbors[reachable_mask]
+                reachable_distances = distances[reachable_mask]
+
+                self.logger.debug(f"Original target {dst} redirected to {reachable_neighbors[np.argmin(reachable_distances)]}")
+                dst = reachable_neighbors[np.argmin(reachable_distances)]
+
         if np.array_equal(src, dst):
             return 0
 
         # 启发函数
         def heuristic(pos: np.ndarray) -> float:
             return np.abs(pos[0] - dst[0]) + np.abs(pos[1] - dst[1])
-
-        # 注意：方向的索引比游戏中的方向值小1，因为去掉了中心方向
-        DIRECTIONS = np.array([
-            [0, -1],  # 上  (游戏方向值1)
-            [1, 0],   # 右  (游戏方向值2)
-            [0, 1],   # 下  (游戏方向值3)
-            [-1, 0],  # 左  (游戏方向值4)
-        ])
 
         # 初始化数组
         closed_array = np.zeros((C.MAP_SIZE, C.MAP_SIZE), dtype=bool)
@@ -133,7 +154,7 @@ class Map:
                     if np.array_equal(parent_pos, src):
                         # 返回对应的方向索引
                         diff = current_pos - src
-                        for i, d in enumerate(DIRECTIONS):
+                        for i, d in enumerate(C.DIRECTIONS):
                             if np.array_equal(diff, d):
                                 return i + 1  # 加1转换为游戏中的方向值
                     current_pos = parent_pos
@@ -143,7 +164,7 @@ class Map:
             closed_array[current_pos[0], current_pos[1]] = True
 
             # 检查所有可能的移动方向
-            for i, d in enumerate(DIRECTIONS):
+            for i, d in enumerate(C.DIRECTIONS):
                 neighbor = current_pos + d
                 next_pos = tuple(neighbor)
 
@@ -171,6 +192,7 @@ class Map:
                     heapq.heappush(open_queue, (f_score, tentative_g_score, next_pos))
 
         # 如果没有找到路径，返回朝向目标的简单方向
+        self.logger.warning(f"No path found from {src} to {dst}")
         dx = dst[0] - src[0]
         dy = dst[1] - src[1]
         if abs(dx) > abs(dy):

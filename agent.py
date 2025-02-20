@@ -1,6 +1,7 @@
 import sys
 import numpy as np
 
+from logger import Logger
 from map import Map, Landscape
 from utils import Constants as C
 from observation import Observation
@@ -21,6 +22,8 @@ class Agent():
     """历史观测结果, 保存至**上一个回合**"""
     obs: Observation
     """当前观测结果"""
+
+    logger: Logger = Logger()
 
     def __init__(self, player: str, env_cfg: Dict[str, Any], obs: Observation) -> None:
         self.player = player
@@ -44,6 +47,7 @@ class Agent():
         """
 
         self.obs = obs
+        self.logger.set_step(step)
 
         # update map with new observation
         self.game_map.update_map(obs)
