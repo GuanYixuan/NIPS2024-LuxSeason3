@@ -62,6 +62,7 @@ class Observation:
 
     step: int  # 当前时间步，从0开始
     player: str  # 玩家ID，"player_0" 或 "player_1"
+    player_id: int  # 玩家ID，0 或 1
     remainingOverageTime: int  # 剩余的超时时间
 
     # 从obs中提取的字段
@@ -96,6 +97,7 @@ class Observation:
         """
         self.step = step
         self.player = player
+        self.player_id = int(player[-1])
         self.remainingOverageTime = remainingOverageTime
 
         if isinstance(obs, str):

@@ -69,6 +69,9 @@ class Agent():
         for unit_id in available_unit_ids:
             unit_pos = unit_positions[unit_id]
             unit_energy = unit_energys[unit_id]
+
+            energy_weight = self.energy_weight_fn(unit_energy, self.game_map.move_cost)
+
             if len(self.relic_node_positions) > 0:
                 nearest_relic_node_position = self.relic_node_positions[0]
                 manhattan_distance = abs(unit_pos[0] - nearest_relic_node_position[0]) + abs(unit_pos[1] - nearest_relic_node_position[1])
@@ -79,11 +82,24 @@ class Agent():
                     actions[unit_id] = [random_direction, 0, 0]
                 else:
                     # otherwise we want to move towards the relic node
-                    actions[unit_id] = [self.game_map.direction_to(unit_pos, nearest_relic_node_position), 0, 0]
+                    actions[unit_id] = [self.game_map.direction_to(unit_pos, nearest_relic_node_position, energy_weight), 0, 0]
             else:
                 # randomly explore by picking a random location on the map and moving there for about 20 steps
                 if step % 20 == 0 or unit_id not in self.unit_explore_locations:
                     rand_loc = (np.random.randint(0, self.env_cfg["map_width"]), np.random.randint(0, self.env_cfg["map_height"]))
                     self.unit_explore_locations[unit_id] = rand_loc
-                actions[unit_id] = [self.game_map.direction_to(unit_pos, self.unit_explore_locations[unit_id]), 0, 0]
+                actions[unit_id] = [self.game_map.direction_to(unit_pos, self.unit_explore_locations[unit_id], energy_weight), 0, 0]
         return actions
+
+    @staticmethod
+    def energy_weight_fn(energy: int, move_cost: int) -> float:
+        steps = energy // move_cost
+
+        if energy < 100 or steps < 20:
+            return 0.15
+        elif energy < 250:
+            return 0.1
+        elif energy < 350:
+            return 0.075
+        else:
+            return 0.03

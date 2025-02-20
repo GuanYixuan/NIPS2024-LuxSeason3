@@ -24,6 +24,14 @@ class Map:
     energy_map: _NDArray[Shape["(MAP_SIZE, MAP_SIZE)"], np.int8]
     """能量地图, 未知值设为0"""
 
+    move_cost: int = 5
+    """移动代价, 默认取最大可能值"""
+    move_cost_estimated: bool = False
+
+    nebula_cost: int = 5
+    """星云能量损耗, 默认取一个较大的可能值"""
+    nebula_cost_estimated: bool = False
+
     nebula_drift_estimated: bool = False
     nebula_drift_speed: float = -1
     nebula_drift_direction: int = -1
@@ -78,8 +86,19 @@ class Map:
             # print(f"Energy map updated at step {obs.step}:\n", self.energy_map.T, file=sys.stderr)
             self.energy_map = obs.map_energy.copy()  # 目前直接更新能量地图
 
+        # 估计移动开销
+        if not self.move_cost_estimated:
+            # 第一个单位刚刚离开原点
+            if obs.units_mask[obs.player_id, 0]:
+                u0_pos = obs.units_position[obs.player_id, 0]
+                if not np.array_equal(u0_pos, np.full(2, 0 if obs.player_id == 0 else C.MAP_SIZE - 1)):
+                    self.move_cost = C.INIT_UNIT_ENERGY - obs.units_energy[obs.player_id, 0] + self.energy_map[tuple(u0_pos)]
+                    self.move_cost_estimated = True
+                    print(f"Move cost estimated, cost: {self.move_cost}", file=sys.stderr)
 
-    def direction_to(self, src: np.ndarray, dst: np.ndarray) -> int:
+        # TODO: 估计星云能量损耗
+
+    def direction_to(self, src: np.ndarray, dst: np.ndarray, energy_weight: float) -> int:
         """利用A*算法计算从src到dst的下一步方向"""
         if np.array_equal(src, dst):
             return 0
@@ -106,7 +125,7 @@ class Map:
         came_from[src[0], src[1]] = src  # 起点的父节点是自己
 
         start: Tuple[int, int] = tuple(src)
-        open_queue = [(heuristic(src), 0, start)]  # (f_score, g_score, current)
+        open_queue = [(heuristic(src), 0.0, start)]  # (f_score, g_score, current)
         heapq.heapify(open_queue)
 
         while open_queue:
@@ -152,12 +171,12 @@ class Map:
                 if closed_array[neighbor[0], neighbor[1]]:
                     continue
 
-                tentative_g_score = g_score + 1
+                tentative_g_score: float = g_score + max(0, 1 - self.energy_map[tuple(neighbor)] * energy_weight)  # type: ignore
 
                 if tentative_g_score < g_scores[neighbor[0], neighbor[1]]:
                     neighbor_tuple = tuple(neighbor)
                     g_scores[neighbor[0], neighbor[1]] = tentative_g_score
-                    f_score = tentative_g_score + heuristic(neighbor)
+                    f_score = tentative_g_score + heuristic(neighbor) * 0.3  # heuristic量纲为1
                     came_from[neighbor[0], neighbor[1]] = current_pos
                     heapq.heappush(open_queue, (f_score, tentative_g_score, neighbor_tuple))
 

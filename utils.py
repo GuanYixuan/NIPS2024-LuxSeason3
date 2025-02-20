@@ -26,3 +26,6 @@ class Constants:
 
     DEFAULT_ENERGY_VALUE = 0
     """默认的能量未知值"""
+
+    INIT_UNIT_ENERGY = 100
+    """单位的初始能量"""
