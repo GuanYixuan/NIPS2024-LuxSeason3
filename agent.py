@@ -82,13 +82,15 @@ class Agent():
 
         # 估计遗迹得分点的位置
         relic_updated = self.estimate_relic_positions()
+        self.update_relic_map()
+        if relic_updated:
+            self.logger.info(f"Map updated: \n{self.relic_map.T}")
 
         unit_mask = obs.units_mask[self.team_id]  # shape (max_units, )
         unit_positions = obs.units_position[self.team_id]  # shape (max_units, 2)
         unit_energys = obs.units_energy[self.team_id]  # shape (max_units, 1)
         observed_relic_node_positions = obs.relic_nodes  # shape (max_relic_nodes, 2)
         observed_relic_nodes_mask = obs.relic_nodes_mask  # shape (max_relic_nodes, )
-        team_points = obs.team_points  # points of each team, team_points[self.team_id] is the points of the your team
 
         # ids of units you can control at this timestep
         available_unit_ids = np.where(unit_mask)[0]
@@ -227,6 +229,22 @@ class Agent():
 
         self.logger.info(f"Relic nodes: \n{self.relic_nodes[0].T}")
         return True
+
+    def update_relic_map(self) -> None:
+        """更新遗迹得分点地图"""
+        self.relic_map = np.zeros((C.MAP_SIZE, C.MAP_SIZE), dtype=np.int8)
+        for idx in range(self.relic_center.shape[0] - 1, -1, -1):
+            r_pos = self.relic_center[idx]
+            big_map_x_slice = slice(max(0, r_pos[0] - C.RELIC_SPREAD), min(C.MAP_SIZE, r_pos[0] + C.RELIC_SPREAD + 1))
+            big_map_y_slice = slice(max(0, r_pos[1] - C.RELIC_SPREAD), min(C.MAP_SIZE, r_pos[1] + C.RELIC_SPREAD + 1))
+            small_map_x_slice = slice(max(0, C.RELIC_SPREAD - r_pos[0]),
+                                      C.RELIC_SPREAD*2+1 - max(0, r_pos[0] + C.RELIC_SPREAD + 1 - C.MAP_SIZE))
+            small_map_y_slice = slice(max(0, C.RELIC_SPREAD - r_pos[1]),
+                                      C.RELIC_SPREAD*2+1 - max(0, r_pos[1] + C.RELIC_SPREAD + 1 - C.MAP_SIZE))
+            self.relic_map[big_map_x_slice, big_map_y_slice] = self.relic_nodes[idx, small_map_x_slice, small_map_y_slice]
+
+        # 对称化地图
+        self.relic_map = np.maximum(self.relic_map, utils.flip_matrix(self.relic_map))
 
     @staticmethod
     def energy_weight_fn(energy: int, move_cost: int) -> float:

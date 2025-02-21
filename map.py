@@ -74,7 +74,7 @@ class Map:
                 if self.nebula_drift_speed > 0.1:
                     self.nebula_drift_speed = 0.15  # 此时移动间隔不是定值
                 self.nebula_drift_estimated = True
-                print(f"Nebula drift estimated, direction: {self.nebula_drift_direction}, speed: {self.nebula_drift_speed}", file=sys.stderr)
+                self.logger.info(f"Nebula drift estimated, direction: {self.nebula_drift_direction}, speed: {self.nebula_drift_speed}")
             else:
                 rolled_map = np.roll(self.obstacle_map, np.array((1, -1)) * self.nebula_drift_direction, (0, 1))
                 self.obstacle_map = np.maximum(rolled_map, obs.map_tile_type)  # type: ignore
@@ -86,7 +86,6 @@ class Map:
         if unmoved:
             self.energy_map[obs.sym_sensor_mask] = obs.map_energy[obs.sym_sensor_mask]
         else:
-            # print(f"Energy map updated at step {obs.step}:\n", self.energy_map.T, file=sys.stderr)
             self.energy_map = obs.map_energy.copy()  # 目前直接更新能量地图
 
     def direction_to(self, src: np.ndarray, dst: np.ndarray, energy_weight: float) -> int:
