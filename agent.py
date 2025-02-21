@@ -7,7 +7,7 @@ from map import Map, Landscape
 from utils import Constants as C
 from observation import Observation
 
-from typing import Dict, List, Tuple, Any
+from typing import Set, Dict, List, Tuple, Any
 
 class RelicInfo(Enum):
     """遗迹得分点推断情况"""
@@ -72,6 +72,7 @@ class Agent():
         self.estimate_params()
 
         # 添加新发现的遗迹中心点位置
+        # TODO: 新的遗迹范围若与旧的重合, 则重合部分的FAKE应该重新设为UNKNOWN
         for r_center in obs.relic_nodes[obs.relic_nodes_mask]:
             if not np.any(np.all(self.relic_center == r_center, axis=1)):
                 self.logger.info(f"New relic center: {r_center}")
@@ -178,10 +179,18 @@ class Agent():
             return False
 
         delta_pts = self.obs.team_points[self.team_id] - self.history[-1].team_points[self.team_id]
+        if self.obs.match_steps == 0:
+            return False
 
         accounted_delta: int = 0
+        processed_pos: Set[Tuple[int, int]] = set()
         inferring_unit_info: List[Tuple[int, int, int]] = []  # (relic_idx, r_pos_x, r_pos_y)
         for u_pos in self.obs.units_position[self.team_id, self.obs.units_mask[self.team_id]]:
+            # 去除重复坐标
+            if (u_pos[0], u_pos[1]) in processed_pos:
+                continue
+            processed_pos.add((u_pos[0], u_pos[1]))
+
             # 确定unit周围的遗迹中心点
             relic_dist = np.max(np.abs(self.relic_center - u_pos), axis=1)
             relic_idx = int(np.argmin(relic_dist))  # 有多个最近中心点时, 数据记录在下标最小处
