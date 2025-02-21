@@ -13,11 +13,6 @@ else:
     Shape = Literal
     _NDArray = Tuple
 
-def flip_matrix(arr: np.ndarray) -> np.ndarray:
-    """根据游戏的对称方式, 对输入的方阵进行翻转"""
-    assert arr.shape[0] == arr.shape[1] and arr.ndim == 2, "arr must be a square matrix"
-    return np.rot90(np.rot90(arr).T, -1)
-
 class Constants:
     """游戏常量"""
 
@@ -25,6 +20,8 @@ class Constants:
     """游戏地图大小"""
     MAX_UNITS = 16
     """最大单位数量"""
+    RELIC_SPREAD = 2
+    """遗迹得分点相对遗迹中心点的最大单轴距离"""
 
     DIRECTIONS = np.array([
         [0, -1],  # 上  (游戏方向值1)
@@ -39,3 +36,19 @@ class Constants:
 
     INIT_UNIT_ENERGY = 100
     """单位的初始能量"""
+
+def flip_matrix(arr: np.ndarray) -> np.ndarray:
+    """根据游戏的对称方式, 对输入的方阵进行翻转"""
+    assert arr.shape[0] == arr.shape[1] and arr.ndim == 2, "arr must be a square matrix"
+    return np.rot90(np.rot90(arr).T, -1)
+
+flip_type = TypeVar("flip_type", Tuple[int, int], np.ndarray)
+def flip_coord(coord: flip_type, size: int = Constants.MAP_SIZE) -> flip_type:
+    """根据游戏的对称方式, 对输入的坐标进行翻转"""
+    if isinstance(coord, tuple):
+        x, y = coord
+        return (size - 1) - y, (size - 1) - x
+    else:
+        x = coord[..., 0]
+        y = coord[..., 1]
+        return np.stack([size - 1 - y, size - 1 - x], axis=-1)
