@@ -1,7 +1,7 @@
 import numpy as np
 from numpy import dtype
 
-from typing import Literal, Tuple
+from typing import Literal, Union, Tuple
 from typing import TYPE_CHECKING, TypeVar
 
 if TYPE_CHECKING:
@@ -36,6 +36,10 @@ class Constants:
 
     INIT_UNIT_ENERGY = 100
     """单位的初始能量"""
+
+def in_map(pos: np.ndarray) -> Union[np.bool_, np.ndarray]:
+    """判断输入的坐标是否在游戏地图内, pos形状如(..., 2)"""
+    return np.all(np.logical_and(pos >= 0, pos < Constants.MAP_SIZE), axis=-1)
 
 def flip_matrix(arr: np.ndarray) -> np.ndarray:
     """根据游戏的对称方式, 对输入的方阵进行翻转"""

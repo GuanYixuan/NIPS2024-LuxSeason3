@@ -43,6 +43,9 @@ class Agent():
     opp_team_id: int
     env_cfg: Dict[str, Any]
 
+    base_pos: np.ndarray
+    """基地位置"""
+
     game_map: Map
     """游戏地图"""
     relic_center: np.ndarray
@@ -68,6 +71,8 @@ class Agent():
         self.opp_player = "player_1" if self.player == "player_0" else "player_0"
         self.team_id = 0 if self.player == "player_0" else 1
         self.opp_team_id = 1 if self.team_id == 0 else 0
+        self.base_pos = np.full(2, 0 if self.team_id == 0 else C.MAP_SIZE-1, dtype=np.int8)
+
         np.random.seed(0)
         self.env_cfg = env_cfg
 
@@ -96,31 +101,41 @@ class Agent():
             return np.zeros((C.MAX_UNITS, 3), dtype=int)
 
         # 添加新发现的遗迹中心点位置
-        # TODO: 新的遗迹范围若与旧的重合, 则重合部分的FAKE应该重新设为UNKNOWN
-        for r_center in obs.relic_nodes[obs.relic_nodes_mask]:
-            if not np.any(np.all(self.relic_center == r_center, axis=1)):
-                self.logger.info(f"New relic center: {r_center}")
-                self.relic_center = np.vstack((self.relic_center, r_center, utils.flip_coord(r_center)))  # 对称地添加
-                self.relic_nodes = np.vstack((self.relic_nodes,
-                                              np.full((2, C.RELIC_SPREAD*2+1, C.RELIC_SPREAD*2+1), RelicInfo.UNKNOWN.value)))
-
-        # 估计遗迹得分点的位置
+        self.update_relic_center()
+        # 估计遗迹得分点位置
         relic_updated = self.estimate_relic_positions()
         self.update_relic_map()
-        # if relic_updated:
-        #     self.logger.info(f"Map updated: \n{self.relic_map.T}")
+        if relic_updated:
+            self.logger.info(f"Map updated: \n{self.relic_map.T}")
+
+        # 根据到基地距离排序各得分点
+        MAX_POINT_DIST = C.MAP_SIZE + 5
+        real_points = np.vstack(np.where(self.relic_map == RelicInfo.REAL.value)).T  # shape (N, 2)
+        dists = np.sum(np.abs(real_points - self.base_pos), axis=1)
+        real_points = real_points[dists <= MAX_POINT_DIST]
+        real_points = real_points[np.argsort(dists[dists <= MAX_POINT_DIST])]  # 按到基地距离排序
+
+        # 根据剩余的UNKNOWN数量排序中心点
+        # TODO: 有一部分中心点不可能全都不是UNKNOWN
+        next_explore_center = -1
+        if self.relic_center.shape[0] > 0:
+            unknown_count = np.sum(self.relic_nodes == RelicInfo.UNKNOWN.value, axis=(1, 2))
+            next_explore_center = np.argmax(unknown_count)
+            if unknown_count[next_explore_center] == 0:
+                next_explore_center = -1  # 所有遗迹都已知, 无需继续探索
 
         # 主要策略
         actions = np.zeros((C.MAX_UNITS, 3), dtype=int)
         allocated_relic_positions: Set[Tuple[int, int]] = \
             set([(t.target_pos[0], t.target_pos[1]) for t in self.task_list if t.type == UnitTaskType.CAPTURE_RELIC])
-        real_points = np.where(self.relic_map == RelicInfo.REAL.value)
         for uid in range(C.MAX_UNITS):
+            task = self.task_list[uid]
             u_selector = (self.team_id, uid)
-            if not obs.units_mask[u_selector]:  # 死亡单位不做任何动作
+            if not obs.units_mask[u_selector] and task.type != UnitTaskType.DEAD:  # 死亡单位不做任何动作
+                self.logger.info(f"Unit {uid} is dead")
                 self.task_list[uid] = UnitTask(UnitTaskType.DEAD, np.zeros(2, dtype=np.int8), step)
                 continue
-            elif self.task_list[uid].type == UnitTaskType.DEAD:  # 重新分配任务
+            elif obs.units_mask[u_selector] and self.task_list[uid].type == UnitTaskType.DEAD:  # 重新分配任务
                 self.task_list[uid] = UnitTask(UnitTaskType.NOT_ALLOCATED, np.zeros(2, dtype=np.int8), step)
 
             task = self.task_list[uid]
@@ -131,7 +146,7 @@ class Agent():
             # 任务分配
             # 先尝试走向一个还没被分配的REAL点
             if task.type == UnitTaskType.NOT_ALLOCATED or task.type == UnitTaskType.EXPLORE_RELIC:
-                for real_pos in zip(*real_points):
+                for real_pos in real_points:
                     if (real_pos[0], real_pos[1]) not in allocated_relic_positions:
                         task.type = UnitTaskType.CAPTURE_RELIC
                         task.target_pos = real_pos
@@ -140,16 +155,12 @@ class Agent():
                         self.logger.info(f"Unit {uid} allocated to capture relic at {real_pos}")
                         break
             # 再尝试寻找REAL点
-            if task.type == UnitTaskType.NOT_ALLOCATED and self.relic_center.shape[0] > 0:
-                # 寻找距离最近的遗迹中心点
-                dists = np.sum(np.abs(u_pos - self.relic_center), axis=1)
-                closest_center_idx = np.argmin(dists)
-                closest_center = self.relic_center[closest_center_idx]
+            if task.type == UnitTaskType.NOT_ALLOCATED and next_explore_center >= 0:
                 # 尝试走向遗迹中心点
                 task.type = UnitTaskType.EXPLORE_RELIC
-                task.target_pos = closest_center
+                task.target_pos = self.relic_center[next_explore_center]
                 task.start_step = step
-                self.logger.info(f"Unit {uid} allocated to explore relic center at {closest_center}")
+                self.logger.info(f"Unit {uid} allocated to explore relic center at {task.target_pos}")
             # 最后尝试随机游走
             if task.type == UnitTaskType.NOT_ALLOCATED:
                 task.type = UnitTaskType.WANDER
@@ -215,6 +226,28 @@ class Agent():
                         gmap.nebula_cost_estimated = True
                         self.logger.info(f"Nebula cost estimated: {gmap.nebula_cost}")
 
+    def update_relic_center(self) -> None:
+        """添加新发现的遗迹中心点位置
+           """
+        obs = self.obs
+        for r_center in obs.relic_nodes[obs.relic_nodes_mask]:
+            if not np.any(np.all(self.relic_center == r_center, axis=1)):
+                self.logger.info(f"New relic center: {r_center}")
+                # 新的遗迹范围若与旧的重合, 则重合部分的FAKE应该重新设为UNKNOWN
+                # 预计出现次数不多, 故使用原始实现
+                for old_idx, old_center in enumerate(self.relic_center):
+                    for dx in range(-C.RELIC_SPREAD, C.RELIC_SPREAD+1):
+                        for dy in range(-C.RELIC_SPREAD, C.RELIC_SPREAD+1):
+                            pos = old_center + np.array([dx, dy])
+                            if utils.in_map(pos) and np.sum(np.abs(pos - r_center)) <= C.RELIC_SPREAD:
+                                if self.relic_nodes[old_idx, dx+C.RELIC_SPREAD, dy+C.RELIC_SPREAD] == RelicInfo.FAKE.value:
+                                    self.relic_nodes[old_idx, dx+C.RELIC_SPREAD, dy+C.RELIC_SPREAD] = RelicInfo.UNKNOWN.value
+
+                # 添加新的遗迹中心点
+                self.relic_center = np.vstack((self.relic_center, r_center, utils.flip_coord(r_center)))  # 对称地添加
+                self.relic_nodes = np.vstack((self.relic_nodes,
+                                              np.full((2, C.RELIC_SPREAD*2+1, C.RELIC_SPREAD*2+1), RelicInfo.UNKNOWN.value)))
+
     def estimate_relic_positions(self) -> bool:
         """估计遗迹得分点的位置, 返回是否有更新"""
         if not len(self.history) or not len(self.relic_center):
@@ -234,10 +267,10 @@ class Agent():
             processed_pos.add((u_pos[0], u_pos[1]))
 
             # 确定unit周围的遗迹中心点
-            relic_dist = np.max(np.abs(self.relic_center - u_pos), axis=1)
-            relic_idx = int(np.argmin(relic_dist))  # 有多个最近中心点时, 数据记录在下标最小处
-            if relic_dist[relic_idx] > C.RELIC_SPREAD:
+            relic_dist_valid = np.max(np.abs(self.relic_center - u_pos), axis=1) <= C.RELIC_SPREAD
+            if not np.any(relic_dist_valid):
                 continue
+            relic_idx = int(np.argmax(relic_dist_valid))  # 有多个中心点时, 数据记录在下标最小处
 
             # 在TRUE点上的unit记录accounted_delta
             relative_pos = u_pos - self.relic_center[relic_idx] + C.RELIC_SPREAD
@@ -291,9 +324,9 @@ class Agent():
         steps = energy // move_cost
 
         if energy < 100 or steps < 20:
-            return 0.15
+            return 0.2
         elif energy < 250:
-            return 0.1
+            return 0.15
         elif energy < 350:
             return 0.075
         else:
