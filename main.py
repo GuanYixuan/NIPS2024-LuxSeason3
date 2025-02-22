@@ -1,5 +1,4 @@
 import json
-import sys
 import numpy as np
 from argparse import Namespace
 from typing import Dict, Any, List
