@@ -92,6 +92,8 @@ class Map:
         """利用A*算法计算从src到dst的下一步方向"""
         src = np.array(src)
         dst = np.array(dst)
+        if np.array_equal(src, dst):
+            return 0
 
         # 如果目标是障碍物, 寻找最近的可达邻格作为新目标
         if self.obstacle_map[tuple(dst)] == Landscape.ASTEROID.value:
