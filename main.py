@@ -29,7 +29,6 @@ def agent_fn(obs: Namespace, configurations: Dict[str, Any]) -> Dict[str, List[i
     return dict(action=actions.tolist())
 
 if __name__ == "__main__":
-    print("Starting agent...", file=sys.stderr)
     def read_input() -> str:
         """
         Reads input from stdin

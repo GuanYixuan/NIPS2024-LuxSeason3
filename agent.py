@@ -42,6 +42,12 @@ class UnitTask:
         self.start_step = start_step
         self.data = {}
 
+    def __repr__(self) -> str:
+        return f"UnitTask(type={self.type.name}, target_pos={self.target_pos})"
+
+    def __str__(self) -> str:
+        return f"({self.type.name}, {self.target_pos})"
+
     def clear(self) -> None:
         self.type = UnitTaskType.NOT_ALLOCATED
         self.target_pos = np.zeros(2, dtype=np.int8)
@@ -133,8 +139,11 @@ class Agent():
         MAX_POINT_DIST = C.MAP_SIZE + 10
         real_points = np.vstack(np.where(self.relic_map == RelicInfo.REAL.value)).T  # shape (N, 2)
         dists = np.sum(np.abs(real_points - self.base_pos), axis=1)
-        real_points = real_points[dists <= MAX_POINT_DIST]
-        real_points = real_points[np.argsort(dists[dists <= MAX_POINT_DIST])]  # 按到基地距离排序
+        argsort = np.argsort(dists)
+        dists = dists[argsort]
+        real_points = real_points[argsort]  # 按到基地距离排序
+        real_points_near = real_points[dists <= MAX_POINT_DIST]
+        real_points_far = real_points[dists > MAX_POINT_DIST]
 
         # 根据到基地距离排序各未知点
         unknown_points = np.vstack(np.where(self.relic_map == RelicInfo.UNKNOWN.value)).T  # shape (N, 2)
@@ -154,13 +163,13 @@ class Agent():
             elif obs.units_mask[u_selector] and self.task_list[uid].type == UnitTaskType.DEAD:  # 新出现的单位等待重新分配任务
                 self.task_list[uid] = UnitTask(UnitTaskType.NOT_ALLOCATED, np.zeros(2, dtype=np.int8), step)
 
-        # 1. 从各个遗迹得分点出发, 寻找最近的空闲单位并分配为CAPTURE_RELIC任务
+        # 1. 从各个较近的遗迹得分点出发, 寻找最近的空闲单位并分配为CAPTURE_RELIC任务
         actions = np.zeros((C.MAX_UNITS, 3), dtype=int)
         allocated_real_positions: Set[Tuple[int, int]] = \
             set([(t.target_pos[0], t.target_pos[1]) for t in self.task_list if t.type == UnitTaskType.CAPTURE_RELIC])
         allocated_unknown_positions: Set[Tuple[int, int]] = \
             set([(t.target_pos[0], t.target_pos[1]) for t in self.task_list if t.type == UnitTaskType.INVESTIGATE])
-        for real_pos in real_points:
+        for real_pos in real_points_near:
             pos_tuple = (real_pos[0], real_pos[1])
             if pos_tuple in allocated_real_positions:
                 continue
@@ -191,7 +200,23 @@ class Agent():
             self.task_list[closest_uid] = UnitTask(UnitTaskType.INVESTIGATE, unknown_pos, step)
             self.logger.info(f"Unit {closest_uid} -> unknown {unknown_pos}")
 
-        # 3. 最后未分配的单位执行EXPLORE任务
+        # 3. 空闲单位走向较远的遗迹得分点
+        for real_pos in real_points_far:
+            pos_tuple = (real_pos[0], real_pos[1])
+            if pos_tuple in allocated_real_positions:
+                continue
+
+            dists = np.sum(np.abs(obs.my_units_pos - real_pos), axis=1)
+            free_mask = np.array([t.type == UnitTaskType.NOT_ALLOCATED for t in self.task_list])
+            if not np.any(free_mask):
+                break  # 所有单位都有更高优先级任务
+
+            dists[~free_mask] = 10000
+            closest_uid = np.argmin(dists)
+            self.task_list[closest_uid] = UnitTask(UnitTaskType.CAPTURE_RELIC, real_pos, step)
+            self.logger.info(f"Unit {closest_uid} -> relic far {real_pos}")
+
+        # 4. 最后未分配的单位执行EXPLORE任务
         for uid in range(C.MAX_UNITS):
             if self.task_list[uid].type == UnitTaskType.NOT_ALLOCATED:
                 t_pos = np.array([np.random.randint(0, C.MAP_SIZE), np.random.randint(0, C.MAP_SIZE)])
@@ -200,6 +225,9 @@ class Agent():
 
                 self.task_list[uid] = UnitTask(UnitTaskType.EXPLORE, t_pos, step)
                 self.logger.info(f"Unit {uid} -> explore {t_pos}")
+
+        # 输出统计信息
+        # self.logger.info("Task list: \n%s" % "\n".join(["%d: %s" % (i, str(t)) for i, t in enumerate(self.task_list)]))
 
         # -1. 各单位执行各自的任务
         for uid in range(C.MAX_UNITS):
@@ -222,6 +250,9 @@ class Agent():
                 else:
                     actions[uid] = [self.game_map.direction_to(u_pos, task.target_pos, energy_weight), 0, 0]
 
+                if self.relic_map[tuple(task.target_pos)] != RelicInfo.UNKNOWN.value:
+                    self.logger.info(f"Unit {uid} complete INVESTIGATE task")
+                    task.clear()
                 if step > first_arrival + 20:  # 任务自动结束
                     self.logger.info(f"Unit {uid} ends INVESTIGATE task")
                     task.clear()
