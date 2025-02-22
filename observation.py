@@ -126,3 +126,15 @@ class Observation:
         mask_flipped = flip_matrix(self.sensor_mask)
         self.map_energy[~self.sensor_mask] = Constants.DEFAULT_ENERGY_VALUE
         self.map_energy[mask_flipped] = flip_matrix(self.map_energy)[mask_flipped]
+
+        # TODO: 可以根据sensor范围更快地推断NEBULA的位置, 但目前来看推断的速度已经比较快了
+
+    @property
+    def my_units_pos(self) -> np.ndarray:
+        """玩家所控制的单位位置"""
+        return self.units_position[self.player_id]
+
+    @property
+    def my_units_energy(self) -> np.ndarray:
+        """玩家所控制的单位能量"""
+        return self.units_energy[self.player_id]
