@@ -115,7 +115,7 @@ class Agent():
         self.history = []
 
     def act(self, step: int, obs: Observation, remainingOverageTime: int = 60) -> np.ndarray:
-        """step is the current timestep number of the game starting from 0 going up to max_steps_in_match * match_count_per_episode - 1"""
+        """step: [0, max_steps_in_match * match_count_per_episode)"""
 
         self.obs = obs
         self.logger.set_step(step)
@@ -175,7 +175,9 @@ class Agent():
                 continue
 
             dists = np.sum(np.abs(obs.my_units_pos - real_pos), axis=1)
-            free_mask = np.array([t.type in (UnitTaskType.NOT_ALLOCATED, UnitTaskType.INVESTIGATE, UnitTaskType.EXPLORE) for t in self.task_list])
+            free_mask = np.array([
+                t.type in (UnitTaskType.NOT_ALLOCATED, UnitTaskType.INVESTIGATE, UnitTaskType.EXPLORE)
+                for t in self.task_list])
             if not np.any(free_mask):
                 break  # 所有单位都有更高优先级任务
 

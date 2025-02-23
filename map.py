@@ -1,4 +1,3 @@
-import sys
 import heapq
 import numpy as np
 from enum import Enum
@@ -74,7 +73,8 @@ class Map:
                 if self.nebula_drift_speed > 0.1:
                     self.nebula_drift_speed = 0.15  # 此时移动间隔不是定值
                 self.nebula_drift_estimated = True
-                self.logger.info(f"Nebula drift estimated, direction: {self.nebula_drift_direction}, speed: {self.nebula_drift_speed}")
+                self.logger.info("Nebula drift estimated, direction: %d, speed: %.3f" %
+                                 (self.nebula_drift_direction, self.nebula_drift_speed))
             else:
                 rolled_map = np.roll(self.obstacle_map, np.array((1, -1)) * self.nebula_drift_direction, (0, 1))
                 self.obstacle_map = np.maximum(rolled_map, obs.map_tile_type)  # type: ignore
@@ -170,8 +170,7 @@ class Map:
                 next_pos = tuple(neighbor)
 
                 # 检查是否越界
-                if (neighbor[0] < 0 or neighbor[0] >= C.MAP_SIZE or
-                    neighbor[1] < 0 or neighbor[1] >= C.MAP_SIZE):
+                if np.any(neighbor < 0) or np.any(neighbor >= C.MAP_SIZE):
                     continue
 
                 # 检查是否是障碍物

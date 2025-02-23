@@ -25,7 +25,7 @@ class Logger:
             handler = logging.StreamHandler(sys.stderr)
             # 使用自定义的格式化器，添加 step 字段
             formatter = StepFormatter('%(asctime)s - %(levelname)s - Step %(step)d - %(message)s',
-                                   datefmt='%H:%M:%S')
+                                      datefmt='%H:%M:%S')
             handler.setFormatter(formatter)
             cls._instance.logger.addHandler(handler)
 
