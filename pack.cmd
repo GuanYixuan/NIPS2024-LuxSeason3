@@ -1,0 +1,1 @@
+tar -czvf submission.tar.gz --exclude=".git" --exclude="__pycache__" *
