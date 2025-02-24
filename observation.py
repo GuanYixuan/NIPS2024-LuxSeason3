@@ -138,3 +138,13 @@ class Observation:
     def my_units_energy(self) -> np.ndarray:
         """玩家所控制的单位能量"""
         return self.units_energy[self.player_id]
+
+    @property
+    def opp_units_pos(self) -> np.ndarray:
+        """对手所控制的单位位置"""
+        return self.units_position[1 - self.player_id]
+
+    @property
+    def opp_units_energy(self) -> np.ndarray:
+        """对手所控制的单位能量"""
+        return self.units_energy[1 - self.player_id]

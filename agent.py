@@ -54,6 +54,30 @@ class UnitTask:
         self.start_step = 0
         self.data.clear()
 
+class SapOrder:
+    """攻击需求项"""
+
+    target_pos: np.ndarray
+    """目标位置"""
+    priority: float
+    """目标优先级"""
+    need_hit_count: int
+    """需要的命中数"""
+    fulfilled_count: int
+    """已分配的命中数"""
+
+    def __init__(self, target_pos: np.ndarray, priority: float, need_hit_count: int) -> None:
+        self.target_pos = target_pos
+        self.priority = priority
+        self.need_hit_count = need_hit_count
+        self.fulfilled_count = 0
+
+    def __lt__(self, other: "SapOrder") -> bool:
+        return self.priority < other.priority
+
+    def satisfied(self) -> bool:
+        return self.fulfilled_count >= self.need_hit_count
+
 class Agent():
 
     player: str
@@ -63,9 +87,11 @@ class Agent():
     env_cfg: Dict[str, Any]
 
     sap_cost: int
-    """攻击开销"""
+    """攻击开销, 也等于直接命中时的伤害"""
     sap_range: int
     """攻击范围"""
+    sap_dropoff: float = 0.25
+    """攻击偏离时的伤害倍率, TODO: 估计它"""
 
 
     base_pos: np.ndarray
@@ -88,6 +114,8 @@ class Agent():
 
     task_list: List[UnitTask]
     """单位任务列表"""
+    sap_orders: List[SapOrder]
+    """攻击需求列表"""
 
     logger: Logger = Logger()
 
@@ -107,9 +135,7 @@ class Agent():
         self.relic_nodes = np.zeros((0, C.RELIC_SPREAD*2+1, C.RELIC_SPREAD*2+1), dtype=np.int8)
 
         self.task_list = [UnitTask(UnitTaskType.DEAD, np.zeros(2, dtype=np.int8), 0) for _ in range(C.MAX_UNITS)]
-        self.relic_node_positions = []
-        self.discovered_relic_nodes_ids = set()
-        self.unit_explore_locations = dict()
+        self.sap_orders = []
 
         self.game_map = Map(obs)
         self.history = []
@@ -117,6 +143,7 @@ class Agent():
     def act(self, step: int, obs: Observation, remainingOverageTime: int = 60) -> np.ndarray:
         """step: [0, max_steps_in_match * match_count_per_episode)"""
 
+        # -------------------- 处理观测结果 --------------------
         self.obs = obs
         self.logger.set_step(step)
 
@@ -135,13 +162,16 @@ class Agent():
         if relic_updated:
             self.logger.info(f"Map updated: \n{self.relic_map.T}")
 
+        # -------------------- 任务分配预处理 --------------------
+
         # 根据到基地距离排序各得分点
-        MAX_POINT_DIST = C.MAP_SIZE + 10
+        MAX_POINT_DIST = C.MAP_SIZE + 7
         real_points = np.vstack(np.where(self.relic_map == RelicInfo.REAL.value)).T  # shape (N, 2)
         dists = np.sum(np.abs(real_points - self.base_pos), axis=1)
         argsort = np.argsort(dists)
         dists = dists[argsort]
         real_points = real_points[argsort]  # 按到基地距离排序
+        real_points_myhalf = real_points[dists <= C.MAP_SIZE]
         real_points_near = real_points[dists <= MAX_POINT_DIST]
         real_points_far = real_points[dists > MAX_POINT_DIST]
 
@@ -150,6 +180,43 @@ class Agent():
         dists = np.sum(np.abs(unknown_points - self.base_pos), axis=1)
         unknown_points = unknown_points[dists <= C.MAP_SIZE]  # 只需要排查我方半区的未知点
         unknown_points = unknown_points[np.argsort(dists[dists <= C.MAP_SIZE])]  # 按到基地距离排序
+
+        # 生成攻击需求列表
+        self.sap_orders = []
+        for valid, enemy_pos, enemy_energy in zip(obs.units_mask[1-self.team_id], obs.opp_units_pos, obs.opp_units_energy):
+            if not valid:
+                continue
+
+            priority = 0.0
+
+            # 按条件累加优先级
+            # 1. 在我方半区得分点附近
+            min_dist = np.min(np.sum(np.abs(real_points_myhalf - enemy_pos), axis=1))
+            if min_dist <= 7:
+                priority += min(7 - min_dist, 3.0) + 1.0
+
+            # 2. 在得分点上
+            if self.relic_map[tuple(enemy_pos)] == RelicInfo.REAL.value:
+                priority += 3.0
+
+            # 3. 能量较低
+            need_hit_count = int(enemy_energy / self.sap_cost) + 1
+            if need_hit_count == 1:
+                priority += 2.0
+            elif need_hit_count == 2:
+                priority += 1.0
+            elif need_hit_count == 3:
+                priority += 0.5
+
+            # TODO: 打提前量
+            # TODO: 融合多个相邻的SapOrder
+            self.sap_orders.append(SapOrder(enemy_pos, priority, need_hit_count))
+            if priority > 0.0:
+                self.logger.info(f"SapOrder: {enemy_pos} {priority} {need_hit_count}")
+
+        self.sap_orders.sort()
+
+        # -------------------- 任务分配 --------------------
 
         # 主要策略
         # 0. 处理单位的出现与消失
@@ -231,7 +298,7 @@ class Agent():
         # 输出统计信息
         # self.logger.info("Task list: \n%s" % "\n".join(["%d: %s" % (i, str(t)) for i, t in enumerate(self.task_list)]))
 
-        # -1. 各单位执行各自的任务
+        # ------------------ 各单位执行各自的任务 --------------------
         for uid in range(C.MAX_UNITS):
             task = self.task_list[uid]
             u_selector = (self.team_id, uid)
