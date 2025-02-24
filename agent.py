@@ -73,7 +73,15 @@ class SapOrder:
         self.fulfilled_count = 0
 
     def __lt__(self, other: "SapOrder") -> bool:
+        if self.priority == other.priority:
+            return self.need_hit_count > other.need_hit_count
         return self.priority < other.priority
+
+    def __repr__(self) -> str:
+        return f"SapOrder(pri={self.priority}, {self.target_pos}, need {self.need_hit_count} hits)"
+
+    def __str__(self) -> str:
+        return f"({self.priority}, {self.target_pos}, need {self.need_hit_count} hits)"
 
     def satisfied(self) -> bool:
         return self.fulfilled_count >= self.need_hit_count
@@ -184,16 +192,17 @@ class Agent():
         # 生成攻击需求列表
         self.sap_orders = []
         for valid, enemy_pos, enemy_energy in zip(obs.units_mask[1-self.team_id], obs.opp_units_pos, obs.opp_units_energy):
-            if not valid:
+            if not valid or enemy_energy < 0:
                 continue
 
             priority = 0.0
 
             # 按条件累加优先级
             # 1. 在我方半区得分点附近
-            min_dist = np.min(np.sum(np.abs(real_points_myhalf - enemy_pos), axis=1))
-            if min_dist <= 7:
-                priority += min(7 - min_dist, 3.0) + 1.0
+            if real_points_myhalf.shape[0] > 0:
+                min_dist = np.min(np.sum(np.abs(real_points_myhalf - enemy_pos), axis=1))
+                if min_dist <= 7:
+                    priority += min(7 - min_dist, 3.0) + 1.0
 
             # 2. 在得分点上
             if self.relic_map[tuple(enemy_pos)] == RelicInfo.REAL.value:
@@ -211,10 +220,9 @@ class Agent():
             # TODO: 打提前量
             # TODO: 融合多个相邻的SapOrder
             self.sap_orders.append(SapOrder(enemy_pos, priority, need_hit_count))
-            if priority > 0.0:
-                self.logger.info(f"SapOrder: {enemy_pos} {priority} {need_hit_count}")
 
-        self.sap_orders.sort()
+        self.sap_orders.sort(reverse=True)
+        if len(self.sap_orders) > 0: self.logger.info(f"Sap orders: {self.sap_orders}")
 
         # -------------------- 任务分配 --------------------
 
@@ -299,12 +307,29 @@ class Agent():
         # self.logger.info("Task list: \n%s" % "\n".join(["%d: %s" % (i, str(t)) for i, t in enumerate(self.task_list)]))
 
         # ------------------ 各单位执行各自的任务 --------------------
+        MIN_SAP_PRIORITY: Dict[UnitTaskType, float] = {
+            UnitTaskType.CAPTURE_RELIC: 4.5,
+            UnitTaskType.INVESTIGATE: 3.0,
+            UnitTaskType.EXPLORE: 1.0
+        }
         for uid in range(C.MAX_UNITS):
             task = self.task_list[uid]
             u_selector = (self.team_id, uid)
             u_pos = obs.units_position[u_selector]
             u_energy = obs.units_energy[u_selector]
             energy_weight = self.energy_weight_fn(u_energy, self.game_map.move_cost)
+
+            # 判断是否进行攻击
+            can_sap_count = int(u_energy / self.sap_cost)
+            if can_sap_count > 2:  # 能量较充足, 可考虑攻击
+                saps_in_range: List[SapOrder] = \
+                    [s for s in self.sap_orders if np.max(np.abs(s.target_pos - u_pos)) <= self.sap_range]
+                if len(saps_in_range) > 0:
+                    sap_target = saps_in_range[0].target_pos
+                    actions[uid] = [5, sap_target[0]-u_pos[0], sap_target[1]-u_pos[1]]
+                    self.logger.info(f"Unit {uid} -> sap {sap_target}")
+                    # TODO: 更新fulfilled_count
+                    continue
 
             # CAPTURE_RELIC任务: 直接走向对应目标
             if task.type == UnitTaskType.CAPTURE_RELIC:
