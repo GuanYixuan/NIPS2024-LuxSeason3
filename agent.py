@@ -191,8 +191,8 @@ class Agent():
 
         # 生成攻击需求列表
         self.sap_orders = []
-        for valid, enemy_pos, enemy_energy in zip(obs.units_mask[1-self.team_id], obs.opp_units_pos, obs.opp_units_energy):
-            if not valid or enemy_energy < 0:
+        for eid, e_pos, e_energy in zip(range(C.MAX_UNITS), obs.opp_units_pos, obs.opp_units_energy):
+            if not obs.units_mask[self.team_id, eid] or e_energy < 0:
                 continue
 
             priority = 0.0
@@ -200,16 +200,16 @@ class Agent():
             # 按条件累加优先级
             # 1. 在我方半区得分点附近
             if real_points_myhalf.shape[0] > 0:
-                min_dist = np.min(np.sum(np.abs(real_points_myhalf - enemy_pos), axis=1))
+                min_dist = np.min(np.sum(np.abs(real_points_myhalf - e_pos), axis=1))
                 if min_dist <= 7:
                     priority += min(7 - min_dist, 3.0) + 1.0
 
             # 2. 在得分点上
-            if self.relic_map[tuple(enemy_pos)] == RelicInfo.REAL.value:
+            if self.relic_map[tuple(e_pos)] == RelicInfo.REAL.value:
                 priority += 3.0
 
             # 3. 能量较低
-            need_hit_count = int(enemy_energy / self.sap_cost) + 1
+            need_hit_count = int(e_energy / self.sap_cost) + 1
             if need_hit_count == 1:
                 priority += 2.0
             elif need_hit_count == 2:
@@ -219,7 +219,28 @@ class Agent():
 
             # TODO: 打提前量
             # TODO: 融合多个相邻的SapOrder
-            self.sap_orders.append(SapOrder(enemy_pos, priority, need_hit_count))
+            self.sap_orders.append(SapOrder(e_pos, priority, need_hit_count))
+
+        # 累加处于同一位置上的SapOrder的优先级
+        self.sap_orders.sort(key=lambda x: (x.target_pos[0], x.target_pos[1]))
+        curr_idx = 0
+        while curr_idx < len(self.sap_orders) - 1:
+            if np.array_equal(self.sap_orders[curr_idx].target_pos, self.sap_orders[curr_idx+1].target_pos):
+                self.sap_orders[curr_idx].priority += self.sap_orders[curr_idx+1].priority
+                self.sap_orders[curr_idx].need_hit_count = min(self.sap_orders[curr_idx].need_hit_count, self.sap_orders[curr_idx+1].need_hit_count)
+                self.sap_orders.pop(curr_idx+1)
+            else:
+                curr_idx += 1
+
+        # 每个SapOrder向相邻的SapOrder加上self.sap_dropoff倍的优先级
+        delta_priority = np.zeros(len(self.sap_orders))
+        for i in range(len(self.sap_orders)):
+            for j in range(i+1, len(self.sap_orders)):
+                if np.sum(np.abs(self.sap_orders[i].target_pos - self.sap_orders[j].target_pos)) == 1:
+                    delta_priority[i] += self.sap_dropoff * self.sap_orders[j].priority
+                    delta_priority[j] += self.sap_dropoff * self.sap_orders[i].priority
+        for i in range(len(self.sap_orders)):
+            self.sap_orders[i].priority += delta_priority[i]
 
         self.sap_orders.sort(reverse=True)
         if len(self.sap_orders) > 0: self.logger.info(f"Sap orders: {self.sap_orders}")
