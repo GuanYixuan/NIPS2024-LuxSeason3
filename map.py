@@ -36,6 +36,9 @@ class Map:
     nebula_drift_speed: float = -1
     nebula_drift_direction: int = -1
 
+    energy_drift_estimated: bool = False
+    energy_drift_speed: float = -1
+
     logger: Logger = Logger()
 
     def __init__(self, obs: Observation) -> None:
@@ -86,6 +89,10 @@ class Map:
         if unmoved:
             self.energy_map[obs.sym_sensor_mask] = obs.map_energy[obs.sym_sensor_mask]
         else:
+            if not self.energy_drift_estimated and obs.step > 2:
+                self.energy_drift_speed = 1 / (obs.step - 2)
+                self.energy_drift_estimated = True
+                self.logger.info("Energy drift estimated, speed: %.3f" % self.energy_drift_speed)
             self.energy_map = obs.map_energy.copy()  # 目前直接更新能量地图
 
     def direction_to(self, src: np.ndarray, dst: np.ndarray, energy_weight: float) -> int:
