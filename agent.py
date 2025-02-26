@@ -452,7 +452,8 @@ class Agent():
         accounted_delta: int = 0
         processed_pos: Set[Tuple[int, int]] = set()
         inferring_unit_info: List[Tuple[int, int, int]] = []  # (relic_idx, r_pos_x, r_pos_y)
-        for u_pos in self.obs.units_position[self.team_id, self.obs.units_mask[self.team_id]]:
+        unit_mask = self.obs.units_mask[self.team_id] & (self.obs.my_units_energy >= 0)
+        for u_pos in self.obs.units_position[self.team_id, unit_mask]:
             # 去除重复坐标
             if (u_pos[0], u_pos[1]) in processed_pos:
                 continue
