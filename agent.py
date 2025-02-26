@@ -227,7 +227,7 @@ class Agent():
         while curr_idx < len(self.sap_orders) - 1:
             if np.array_equal(self.sap_orders[curr_idx].target_pos, self.sap_orders[curr_idx+1].target_pos):
                 self.sap_orders[curr_idx].priority += self.sap_orders[curr_idx+1].priority
-                self.sap_orders[curr_idx].need_hit_count = min(self.sap_orders[curr_idx].need_hit_count, self.sap_orders[curr_idx+1].need_hit_count)
+                self.sap_orders[curr_idx].need_hit_count = max(self.sap_orders[curr_idx].need_hit_count, self.sap_orders[curr_idx+1].need_hit_count)
                 self.sap_orders.pop(curr_idx+1)
             else:
                 curr_idx += 1
@@ -342,15 +342,17 @@ class Agent():
 
             # 判断是否进行攻击
             can_sap_count = int(u_energy / self.sap_cost)
-            if can_sap_count > 2:  # 能量较充足, 可考虑攻击
+            if can_sap_count >= 1:
                 saps_in_range: List[SapOrder] = \
                     [s for s in self.sap_orders if np.max(np.abs(s.target_pos - u_pos)) <= self.sap_range]
                 if len(saps_in_range) > 0:
+                    sap_priority = saps_in_range[0].priority
                     sap_target = saps_in_range[0].target_pos
-                    actions[uid] = [5, sap_target[0]-u_pos[0], sap_target[1]-u_pos[1]]
-                    self.logger.info(f"Unit {uid} -> sap {sap_target}")
-                    # TODO: 更新fulfilled_count
-                    continue
+                    if sap_priority >= MIN_SAP_PRIORITY[task.type]:
+                        actions[uid] = [5, sap_target[0]-u_pos[0], sap_target[1]-u_pos[1]]
+                        self.logger.info(f"Unit {uid} -> sap {sap_target}")
+                        # TODO: 更新fulfilled_count
+                        continue
 
             # CAPTURE_RELIC任务: 直接走向对应目标
             if task.type == UnitTaskType.CAPTURE_RELIC:
