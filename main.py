@@ -24,6 +24,7 @@ def agent_fn(obs: Namespace, configurations: Dict[str, Any]) -> Dict[str, List[i
         agent_dict[player] = Agent(player, configurations["env_cfg"], observation)
     agent: Agent = agent_dict[player]
     actions: np.ndarray = agent.act(step, observation, remainingOverageTime)
+    agent.last_action = actions.copy()
     return dict(action=actions.tolist())  # type: ignore
 
 if __name__ == "__main__":

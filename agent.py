@@ -26,6 +26,7 @@ class UnitTaskType(Enum):
     EXPLORE = 3
     """探索未知的遗迹中心点"""
     ATTACK = 4
+    """激进地尝试占领指定遗迹得分点"""
     DEFEND = 5
 
 class UnitTask:
@@ -117,6 +118,8 @@ class Agent():
 
     history: List[Observation]
     """历史观测结果, 保存至**上一个回合**"""
+    last_action: np.ndarray
+    """上一个动作"""
     obs: Observation
     """当前观测结果"""
 
@@ -179,7 +182,6 @@ class Agent():
         argsort = np.argsort(dists)
         dists = dists[argsort]
         real_points = real_points[argsort]  # 按到基地距离排序
-        real_points_myhalf = real_points[dists <= C.MAP_SIZE]
         real_points_near = real_points[dists <= MAX_POINT_DIST]
         real_points_far = real_points[dists > MAX_POINT_DIST]
 
@@ -189,61 +191,7 @@ class Agent():
         unknown_points = unknown_points[dists <= C.MAP_SIZE]  # 只需要排查我方半区的未知点
         unknown_points = unknown_points[np.argsort(dists[dists <= C.MAP_SIZE])]  # 按到基地距离排序
 
-        # 生成攻击需求列表
-        self.sap_orders = []
-        for eid, e_pos, e_energy in zip(range(C.MAX_UNITS), obs.opp_units_pos, obs.opp_units_energy):
-            if not obs.units_mask[self.team_id, eid] or e_energy < 0:
-                continue
-
-            priority = 0.0
-
-            # 按条件累加优先级
-            # 1. 在我方半区得分点附近
-            if real_points_myhalf.shape[0] > 0:
-                min_dist = np.min(np.sum(np.abs(real_points_myhalf - e_pos), axis=1))
-                if min_dist <= 7:
-                    priority += min(7 - min_dist, 3.0) + 1.0
-
-            # 2. 在得分点上
-            if self.relic_map[tuple(e_pos)] == RelicInfo.REAL.value:
-                priority += 3.0
-
-            # 3. 能量较低
-            need_hit_count = int(e_energy / self.sap_cost) + 1
-            if need_hit_count == 1:
-                priority += 2.0
-            elif need_hit_count == 2:
-                priority += 1.0
-            elif need_hit_count == 3:
-                priority += 0.5
-
-            # TODO: 打提前量
-            # TODO: 融合多个相邻的SapOrder
-            self.sap_orders.append(SapOrder(e_pos, priority, need_hit_count))
-
-        # 累加处于同一位置上的SapOrder的优先级
-        self.sap_orders.sort(key=lambda x: (x.target_pos[0], x.target_pos[1]))
-        curr_idx = 0
-        while curr_idx < len(self.sap_orders) - 1:
-            if np.array_equal(self.sap_orders[curr_idx].target_pos, self.sap_orders[curr_idx+1].target_pos):
-                self.sap_orders[curr_idx].priority += self.sap_orders[curr_idx+1].priority
-                self.sap_orders[curr_idx].need_hit_count = max(self.sap_orders[curr_idx].need_hit_count, self.sap_orders[curr_idx+1].need_hit_count)
-                self.sap_orders.pop(curr_idx+1)
-            else:
-                curr_idx += 1
-
-        # 每个SapOrder向相邻的SapOrder加上self.sap_dropoff倍的优先级
-        delta_priority = np.zeros(len(self.sap_orders))
-        for i in range(len(self.sap_orders)):
-            for j in range(i+1, len(self.sap_orders)):
-                if np.sum(np.abs(self.sap_orders[i].target_pos - self.sap_orders[j].target_pos)) == 1:
-                    delta_priority[i] += self.sap_dropoff * self.sap_orders[j].priority
-                    delta_priority[j] += self.sap_dropoff * self.sap_orders[i].priority
-        for i in range(len(self.sap_orders)):
-            self.sap_orders[i].priority += delta_priority[i]
-
-        self.sap_orders.sort(reverse=True)
-        if len(self.sap_orders) > 0: self.logger.info(f"Sap orders: {self.sap_orders}")
+        self.generate_sap_order()
 
         # -------------------- 任务分配 --------------------
 
@@ -343,15 +291,18 @@ class Agent():
             # 判断是否进行攻击
             can_sap_count = int(u_energy / self.sap_cost)
             if can_sap_count >= 1:
-                saps_in_range: List[SapOrder] = \
-                    [s for s in self.sap_orders if np.max(np.abs(s.target_pos - u_pos)) <= self.sap_range]
-                if len(saps_in_range) > 0:
-                    sap_priority = saps_in_range[0].priority
-                    sap_target = saps_in_range[0].target_pos
+                saps_in_range_mask = np.array([
+                    np.max(np.abs(u_pos - sap.target_pos)) <= self.sap_range and not sap.satisfied()
+                    for sap in self.sap_orders
+                ])
+                if np.any(saps_in_range_mask):
+                    selected_sap = np.argmax(saps_in_range_mask)
+                    sap_priority = self.sap_orders[selected_sap].priority
+                    sap_target = self.sap_orders[selected_sap].target_pos
                     if sap_priority >= MIN_SAP_PRIORITY[task.type]:
                         actions[uid] = [5, sap_target[0]-u_pos[0], sap_target[1]-u_pos[1]]
+                        self.sap_orders[selected_sap].fulfilled_count += 1
                         self.logger.info(f"Unit {uid} -> sap {sap_target}")
-                        # TODO: 更新fulfilled_count
                         continue
 
             # CAPTURE_RELIC任务: 直接走向对应目标
@@ -513,6 +464,71 @@ class Agent():
 
         # 对称化地图
         self.relic_map = np.maximum(self.relic_map, utils.flip_matrix(self.relic_map))
+
+    def generate_sap_order(self) -> None:
+        """生成攻击需求列表"""
+        obs = self.obs
+        self.sap_orders = []
+
+        real_points = np.vstack(np.where(self.relic_map == RelicInfo.REAL.value)).T  # shape (N, 2)
+        dists = np.sum(np.abs(real_points - self.base_pos), axis=1)
+        real_points_myhalf = real_points[dists <= C.MAP_SIZE]  # 我方半区得分点
+        for eid, e_pos, e_energy in zip(range(C.MAX_UNITS), obs.opp_units_pos, obs.opp_units_energy):
+            if not obs.units_mask[self.team_id, eid] or e_energy < 0:
+                continue
+
+            priority = 0.0
+
+            # 按条件累加优先级
+            # 1. 在我方半区得分点附近
+            if real_points_myhalf.shape[0] > 0:
+                min_dist = np.min(np.sum(np.abs(real_points_myhalf - e_pos), axis=1))
+                if min_dist <= 7:
+                    priority += min(7 - min_dist, 3.0) + 1.0
+
+            # 2. 在得分点上
+            on_relic = (self.relic_map[tuple(e_pos)] == RelicInfo.REAL.value)
+            if on_relic:
+                priority += 3.0
+
+            # 3. 能量较低
+            need_hit_count = int(e_energy / self.sap_cost) + 1
+            if need_hit_count == 1:
+                priority += 2.0
+            elif need_hit_count == 2:
+                priority += 1.0
+            elif need_hit_count == 3:
+                priority += 0.5
+
+            # TODO: 打提前量
+            # TODO: 融合多个相邻的SapOrder
+            safe_hit_count = need_hit_count if on_relic else need_hit_count + 1
+            self.sap_orders.append(SapOrder(e_pos, priority, safe_hit_count))
+
+        # 累加处于同一位置上的SapOrder的优先级
+        self.sap_orders.sort(key=lambda x: (x.target_pos[0], x.target_pos[1], x.priority), reverse=True)  # 位置相同时按优先级降序排列
+        curr_idx = 0
+        while curr_idx < len(self.sap_orders) - 1:
+            curr_order = self.sap_orders[curr_idx]
+            if np.array_equal(curr_order.target_pos, self.sap_orders[curr_idx+1].target_pos):
+                curr_order.priority += self.sap_orders[curr_idx+1].priority
+                curr_order.need_hit_count = max(curr_order.need_hit_count, self.sap_orders[curr_idx+1].need_hit_count)
+                self.sap_orders.pop(curr_idx+1)
+            else:
+                curr_idx += 1
+
+        # 每个SapOrder向相邻的SapOrder加上self.sap_dropoff倍的优先级
+        delta_priority = np.zeros(len(self.sap_orders))
+        for i in range(len(self.sap_orders)):
+            for j in range(i+1, len(self.sap_orders)):
+                if np.sum(np.abs(self.sap_orders[i].target_pos - self.sap_orders[j].target_pos)) == 1:
+                    delta_priority[i] += self.sap_dropoff * self.sap_orders[j].priority
+                    delta_priority[j] += self.sap_dropoff * self.sap_orders[i].priority
+        for i in range(len(self.sap_orders)):
+            self.sap_orders[i].priority += delta_priority[i]
+
+        self.sap_orders.sort(reverse=True)
+        if len(self.sap_orders) > 0: self.logger.info(f"Sap orders: {self.sap_orders}")
 
     @staticmethod
     def energy_weight_fn(energy: int, move_cost: int) -> float:
