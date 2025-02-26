@@ -31,11 +31,18 @@ class Constants:
     ])
     """四个运动方向, 注意此处索引比游戏中的方向值小1"""
 
+    ADJACENT_DELTAS = np.array([
+        [0, 0], [0, 1], [0, -1], [1, 0], [-1, 0]
+    ])
+    """相邻坐标"""
+
     DEFAULT_ENERGY_VALUE = 0
     """默认的能量未知值"""
 
     INIT_UNIT_ENERGY = 100
     """单位的初始能量"""
+
+    POSSIBLE_SAP_DROPOFF = np.array([0.25, 0.5, 1])
 
 def in_map(pos: np.ndarray) -> Union[np.bool_, np.ndarray]:
     """判断输入的坐标是否在游戏地图内, pos形状如(..., 2)"""

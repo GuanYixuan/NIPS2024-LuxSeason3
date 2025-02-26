@@ -101,6 +101,7 @@ class Agent():
     """攻击范围"""
     sap_dropoff: float = 0.25
     """攻击偏离时的伤害倍率, TODO: 估计它"""
+    sap_dropoff_estimated: bool = False
 
 
     base_pos: np.ndarray
@@ -341,6 +342,7 @@ class Agent():
         if not len(self.history):
             return
 
+        obs = self.obs
         gmap = self.game_map
         last_obs = self.history[-1]
         # 估计移动开销
@@ -370,6 +372,60 @@ class Agent():
                             + gmap.energy_map[tuple(curr_pos)] - gmap.move_cost
                         gmap.nebula_cost_estimated = True
                         self.logger.info(f"Nebula cost estimated: {gmap.nebula_cost}")
+
+        # 此后估计sap_dropoff
+        elif not self.sap_dropoff_estimated:
+            # 提取上回合我方单位发动的sap
+            sap_mask = self.last_action[:, 0] == 5
+            sap_pos = last_obs.my_units_pos[sap_mask] + self.last_action[sap_mask, 1:]
+            # 提取两回合都能看见的敌方单位
+            enemy_mask = last_obs.units_mask[self.opp_team_id] & obs.units_mask[self.opp_team_id]
+            # 提取我方可见单位
+            available_unit_pos = obs.my_units_pos[obs.units_mask[self.team_id]]  # 稍微放宽一点, 不加上能量>0的限制
+
+            # 推测sap_dropoff
+            if sap_pos.shape[0] and np.any(enemy_mask):
+                self.logger.info(f"sap pos: {sap_pos}")
+
+                energy_deltas = obs.opp_units_energy[enemy_mask] - last_obs.opp_units_energy[enemy_mask]
+                enemy_moved = np.any(last_obs.opp_units_pos[enemy_mask] != obs.opp_units_pos[enemy_mask], axis=1)
+                for e_pos, e_moved, e_delta in zip(obs.opp_units_pos[enemy_mask], enemy_moved, energy_deltas):  # type: ignore
+                    # 若对方附近有我方单位, 则涉及unit_energy_void_factor参数, 故跳过
+                    if np.any(np.sum(np.abs(e_pos - available_unit_pos), axis=1) <= 1):
+                        continue
+
+                    # 考虑各种已知的能量变化因素
+                    accounted_delta = gmap.energy_map[tuple(e_pos)]  # 地形能量
+                    if gmap.obstacle_map[tuple(e_pos)] == Landscape.NEBULA.value:  # 星云能量损耗
+                        accounted_delta -= gmap.nebula_cost
+                    if e_moved:  # 移动消耗
+                        accounted_delta -= gmap.move_cost
+
+                    self.logger.info(f"Sap dropoff inference: {e_pos} {e_delta} {e_moved}, accounted_delta: {accounted_delta}")
+
+                    # 考虑我方sap的影响
+                    indirect_hits = 0
+                    for s_pos in sap_pos:
+                        if np.array_equal(s_pos, e_pos):  # 直接命中
+                            accounted_delta -= self.sap_cost
+                        elif np.max(np.abs(s_pos - e_pos)) <= 1:
+                            indirect_hits += 1
+                    if indirect_hits == 0:  # 没有间接命中, 无法推测
+                        continue
+
+                    dropoff_estimate = (e_delta - accounted_delta) / (-self.sap_cost) / indirect_hits
+                    self.logger.info(f"Sap dropoff estimated: {dropoff_estimate} from {indirect_hits} hits")
+
+                    # 取最近值更新sap_dropoff
+                    error = np.abs(C.POSSIBLE_SAP_DROPOFF - dropoff_estimate)
+                    if np.min(error) > 0.05:  # 误差过大, 跳过
+                        continue
+
+                    self.sap_dropoff = C.POSSIBLE_SAP_DROPOFF[np.argmin(error)]
+                    self.sap_dropoff_estimated = True
+                    break
+
+        # TODO: 估计unit_energy_void_factor
 
     def update_relic_center(self) -> None:
         """添加新发现的遗迹中心点位置
