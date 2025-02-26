@@ -1,6 +1,8 @@
 import sys
 import logging
 
+PRODUCTION = (sys.platform != 'win32')
+
 class StepFormatter(logging.Formatter):
     """用于显示当前回合的Formatter"""
     def format(self, record):
@@ -22,17 +24,27 @@ class Logger:
             cls._instance.logger = logging.getLogger('app')
             cls._instance.logger.setLevel(logging.INFO)
 
-            handler = logging.StreamHandler(sys.stderr)
-            # 使用自定义的格式化器，添加 step 字段
-            formatter = StepFormatter('%(asctime)s - %(levelname)s - Step %(step)d - %(message)s',
-                                      datefmt='%H:%M:%S')
-            handler.setFormatter(formatter)
-            cls._instance.logger.addHandler(handler)
+            cls._instance.refresh_handler()
 
         return cls._instance
 
     def set_step(self, step: int) -> None:
         self.step = step
+        self.refresh_handler()
+        if PRODUCTION:
+            self.logger.info(f'Step {step}')
+
+    def refresh_handler(self) -> None:
+        if self.logger.hasHandlers():
+            self.logger.removeHandler(self.logger.handlers[0])
+        handler = logging.StreamHandler(sys.stdout if PRODUCTION else sys.stderr)
+
+        if PRODUCTION:
+            formatter = logging.Formatter('%(message)s')
+        else:
+            formatter = StepFormatter('%(asctime)s - %(levelname)s - Step %(step)d - %(message)s', datefmt='%H:%M:%S')
+        handler.setFormatter(formatter)
+        self.logger.addHandler(handler)
 
     def info(self, message: str) -> None:
         self.logger.info(message)
