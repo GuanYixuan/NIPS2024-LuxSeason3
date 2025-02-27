@@ -643,6 +643,14 @@ class Agent():
 
         # TODO: 单位在得分点上
 
+        # 地形调整(不可达格设置为0)
+        for i in range(C.ADJACENT_DELTAS.shape[0]):
+            pos = curr_pos + C.ADJACENT_DELTAS[i]
+            if not utils.in_map(pos):
+                dir_scores[i] = 0.0
+            elif self.game_map.obstacle_map[tuple(pos)] == Landscape.ASTEROID.value and i != 0:
+                dir_scores[i] = 0.0
+
         # 若不符合任何判据, 返回原点
         if np.sum(dir_scores) == 0:
             return np.array([1.0, 0.0, 0.0, 0.0, 0.0])
@@ -658,6 +666,26 @@ class Agent():
             minv = np.min(dir_scores[[3, 4]])
             dir_scores[[3, 4]] -= minv
             dir_scores[0] += minv
+
+        # 结合能量进行调整
+        max_eng_dir = -1
+        max_eng_score = -np.inf
+        for i in range(1, C.ADJACENT_DELTAS.shape[0]):
+            if dir_scores[i] == 0:
+                continue
+
+            pos = curr_pos + C.ADJACENT_DELTAS[i]
+            eng_score = self.game_map.energy_map[tuple(pos)]
+            if self.game_map.obstacle_map[tuple(pos)] == Landscape.NEBULA.value:
+                eng_score -= self.game_map.nebula_cost
+
+            if eng_score > max_eng_score:
+                max_eng_dir = i
+                max_eng_score = eng_score
+
+        if max_eng_dir != -1:
+            dir_scores[max_eng_dir] *= 2
+            self.logger.info(f"Predict enemy {eid} direction after energy modifications: {dir_scores}")
 
         dir_scores /= np.sum(dir_scores)  # 归一化
         self.logger.info(f"Predict enemy {eid} direction: {dir_scores}")
