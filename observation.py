@@ -130,6 +130,11 @@ class Observation:
         # TODO: 可以根据sensor范围更快地推断NEBULA的位置, 但目前来看推断的速度已经比较快了
 
     @property
+    def my_units_mask(self) -> np.ndarray:
+        """玩家所控制的单位掩码"""
+        return self.units_mask[self.player_id]
+
+    @property
     def my_units_pos(self) -> np.ndarray:
         """玩家所控制的单位位置"""
         return self.units_position[self.player_id]
@@ -138,6 +143,11 @@ class Observation:
     def my_units_energy(self) -> np.ndarray:
         """玩家所控制的单位能量"""
         return self.units_energy[self.player_id]
+
+    @property
+    def opp_units_mask(self) -> np.ndarray:
+        """对手所控制的单位掩码"""
+        return self.units_mask[1 - self.player_id]
 
     @property
     def opp_units_pos(self) -> np.ndarray:

@@ -7,7 +7,7 @@ from map import Map, Landscape
 from utils import Constants as C
 from observation import Observation
 
-from typing import Set, Dict, List, Tuple, Any
+from typing import Set, Dict, List, Tuple, Optional, Any
 
 class RelicInfo(Enum):
     """遗迹得分点推断情况"""
@@ -557,6 +557,8 @@ class Agent():
                 priority += 0.5
 
             # TODO: 打提前量
+            self.__pred_enemy_pos(eid)
+
             # TODO: 融合多个相邻的SapOrder
             safe_hit_count = need_hit_count if on_relic else need_hit_count + 1
             self.sap_orders.append(SapOrder(e_pos, priority, safe_hit_count))
@@ -585,6 +587,81 @@ class Agent():
 
         self.sap_orders.sort(reverse=True)
         if len(self.sap_orders) > 0: self.logger.info(f"Sap orders: {self.sap_orders}")
+
+    def __pred_enemy_pos(self, eid: int) -> np.ndarray:
+        """预测指定id的敌方单位下回合的移动, 下标同C.ADJACENT_DELTAS"""
+
+        curr_pos: np.ndarray = self.obs.opp_units_pos[eid]
+        dir_scores = np.zeros(C.ADJACENT_DELTAS.shape[0])
+
+        # 移动判据：观察历史2~3步移动方向
+        MAX_HISTORY = 4
+        has_history = False
+        pos_delta = curr_pos.copy()
+        for backward_time in range(MAX_HISTORY, 0, -1):
+            if backward_time > len(self.history):
+                continue
+            if self.history[-backward_time].opp_units_mask[eid]:
+                has_history = True
+                pos_delta -= self.history[-backward_time].opp_units_pos[eid]
+                break
+
+        MOVE_CRIT_WEIGHT = max(1.0, 0.3 * backward_time)
+        if has_history:
+            if np.sum(np.abs(pos_delta)) == 0:
+                dir_scores[0] += MOVE_CRIT_WEIGHT
+            else:  # 投影到各个方向
+                hist_dir = pos_delta / np.linalg.norm(pos_delta)
+                dots = np.dot(C.ADJACENT_DELTAS, hist_dir)
+                dir_scores += dots * (dots > 0) * MOVE_CRIT_WEIGHT
+            self.logger.info(f"Predict enemy {eid} direction after move_crit: {dir_scores}")
+
+        # 得分点判据: 所有距离较近的我方半区得分点基本在同一半平面内
+        MAX_DIST = 7
+        real_points_myhalf = np.vstack(np.where(self.relic_map == RelicInfo.REAL.value)).T
+        real_points_myhalf = real_points_myhalf[np.sum(np.abs(real_points_myhalf - self.base_pos), axis=1) <= C.MAP_SIZE]
+        real_point_deltas = real_points_myhalf - curr_pos
+        dists = np.sum(np.abs(real_point_deltas), axis=1)
+        real_point_deltas = (real_point_deltas[(dists <= MAX_DIST) & (dists > 0)]).astype(np.float32)
+        real_point_deltas /= np.linalg.norm(real_point_deltas, axis=1, keepdims=True)
+
+        best_dir: Optional[np.ndarray] = None
+        best_score = 0.0
+        for angle in np.linspace(0, 2*np.pi, 20, endpoint=False):
+            proj_deltas = np.dot(real_point_deltas, np.array([np.cos(angle), np.sin(angle)]))
+            score = np.sum(proj_deltas >= 0) - np.sum(proj_deltas < 0) * 3 + np.mean(proj_deltas) * 0.5
+            if score > best_score:
+                best_dir = np.array([np.cos(angle), np.sin(angle)])
+                best_score = score
+
+        RELIC_CRIT_WEIGHT = 1.0
+        if best_dir is not None:
+            # 投影到各个方向
+            dots = np.dot(C.ADJACENT_DELTAS, best_dir)
+            dir_scores += dots * (dots > 0) * RELIC_CRIT_WEIGHT
+            self.logger.info(f"Predict enemy {eid} direction after relic_crit: {dir_scores}, best_dir: {best_dir}")
+
+        # TODO: 单位在得分点上
+
+        # 若不符合任何判据, 返回原点
+        if np.sum(dir_scores) == 0:
+            return np.array([1.0, 0.0, 0.0, 0.0, 0.0])
+
+        # 处理冲突
+        if np.all(dir_scores[1:] > 0):
+            dir_scores[1:] -= np.min(dir_scores[1:])
+        if np.all(dir_scores[[1, 2]] > 0):
+            minv = np.min(dir_scores[[1, 2]])
+            dir_scores[[1, 2]] -= minv
+            dir_scores[0] += minv
+        if np.all(dir_scores[[3, 4]] > 0):
+            minv = np.min(dir_scores[[3, 4]])
+            dir_scores[[3, 4]] -= minv
+            dir_scores[0] += minv
+
+        dir_scores /= np.sum(dir_scores)  # 归一化
+        self.logger.info(f"Predict enemy {eid} direction: {dir_scores}")
+        return dir_scores
 
     @staticmethod
     def energy_weight_fn(energy: int, move_cost: int) -> float:
