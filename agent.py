@@ -103,6 +103,9 @@ class Agent():
     """攻击偏离时的伤害倍率"""
     sap_dropoff_estimated: bool = False
 
+    sensor_range: int = 1
+    """感知范围"""
+    sensor_range_estimated: bool = False
 
     base_pos: np.ndarray
     """基地位置"""
@@ -169,6 +172,7 @@ class Agent():
         self.estimate_params()
 
         if step == 0:
+            self.history.append(obs)
             return np.zeros((C.MAX_UNITS, 3), dtype=int)
 
         # 添加新发现的遗迹中心点位置
@@ -176,7 +180,8 @@ class Agent():
         # 估计遗迹得分点位置
         relic_updated = self.estimate_relic_positions()
         self.update_relic_map()
-        self.logger.info("Explore map: \n" + str(self.explore_map.T))
+        if np.any(self.explore_map > 0):
+            self.logger.info("Explore map: \n" + str(self.explore_map.T))
         # if relic_updated:
         #     self.logger.info(f"Map updated: \n{self.relic_map.T}")
 
@@ -345,6 +350,16 @@ class Agent():
 
     def estimate_params(self) -> None:
         """估计移动成本、星云能量损耗等参数"""
+
+        # 估计sensor_range
+        if not self.sensor_range_estimated:
+            visible_pos = np.vstack(np.where(self.obs.sensor_mask)).T
+            if visible_pos.shape[0]:
+                self.sensor_range = max(self.sensor_range, np.max(np.abs(visible_pos - self.base_pos)))
+                self.logger.info(f"Sensor range estimated: {self.sensor_range}")
+                # TODO: 假如所有视野都被星云遮挡?
+                self.sensor_range_estimated = True
+
         if not len(self.history):
             return
 
