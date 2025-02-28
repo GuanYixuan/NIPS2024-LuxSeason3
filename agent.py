@@ -530,6 +530,7 @@ class Agent():
         dists = np.sum(np.abs(real_points - self.base_pos), axis=1)
         real_points_myhalf = real_points[dists <= C.MAP_SIZE]  # 我方半区得分点
         for eid, e_pos, e_energy in zip(range(C.MAX_UNITS), obs.opp_units_pos, obs.opp_units_energy):
+            enemy_can_move = (e_energy >= self.game_map.move_cost)
             if not obs.units_mask[self.team_id, eid] or e_energy < 0:
                 continue
 
@@ -556,11 +557,12 @@ class Agent():
             elif need_hit_count == 3:
                 priority += 0.5
 
-            # TODO: 打提前量
-            self.__pred_enemy_pos(eid)
+            # 打提前量
+            if not on_relic and enemy_can_move:
+                e_pos += C.ADJACENT_DELTAS[np.argmax(self.__pred_enemy_pos(eid))]
 
             # TODO: 融合多个相邻的SapOrder
-            safe_hit_count = need_hit_count if on_relic else need_hit_count + 1
+            safe_hit_count = need_hit_count + 0 if (self.sap_dropoff == 1 or not enemy_can_move) else 1
             self.sap_orders.append(SapOrder(e_pos, priority, safe_hit_count))
 
         # 累加处于同一位置上的SapOrder的优先级
@@ -595,6 +597,7 @@ class Agent():
         dir_scores = np.zeros(C.ADJACENT_DELTAS.shape[0])
 
         # 移动判据：观察历史2~3步移动方向
+        # TODO: 长期站着不动需要特判
         MAX_HISTORY = 4
         has_history = False
         pos_delta = curr_pos.copy()
