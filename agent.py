@@ -1,5 +1,6 @@
 import numpy as np
 from enum import Enum
+from scipy.signal import convolve2d
 
 import utils
 from logger import Logger
@@ -204,6 +205,23 @@ class Agent():
         unknown_points = unknown_points[np.argsort(dists[dists <= C.MAP_SIZE])]  # 按到基地距离排序
 
         self.generate_sap_order()
+
+        # 选出值得探索的目标点
+        K_SIZE = 5
+        explore_values: np.ndarray = convolve2d(self.explore_map, np.ones((K_SIZE, K_SIZE)), mode='valid')
+        coords = np.meshgrid(np.arange(C.MAP_SIZE-K_SIZE+1) + K_SIZE//2, np.arange(C.MAP_SIZE-K_SIZE+1) + K_SIZE//2)
+        explore_points = np.column_stack((coords[0].flatten(), coords[1].flatten(), explore_values.flatten()))  # shape (N, 3)
+        explore_points = explore_points[np.sum(np.abs(explore_points[:, :2] - self.base_pos), axis=1) < C.MAP_SIZE]
+        explore_pri = explore_points[:, 2] + 0.01 * np.sum(np.abs(explore_points[:, :2] - self.base_pos), axis=1)
+        explore_points = explore_points[np.argsort(-explore_pri)]  # 按优先级排序
+
+        # 根据sensor_range去重
+        next_idx: int = 1
+        while next_idx < explore_points.shape[0]:
+            dup_mask = np.any(np.abs(explore_points[next_idx:, :2] - explore_points[next_idx-1, :2]) <= self.sensor_range, axis=1)
+            explore_points = np.concatenate((explore_points[:next_idx], explore_points[next_idx:][~dup_mask]))
+            next_idx += 1
+        self.logger.info(f"Explore points: \n{explore_points}")
 
         # -------------------- 任务分配 --------------------
 
