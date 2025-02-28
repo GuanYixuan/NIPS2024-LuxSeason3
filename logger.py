@@ -35,7 +35,7 @@ class Logger:
             self.logger.info(f'Step {step}')
 
     def refresh_handler(self) -> None:
-        if self.logger.hasHandlers():
+        if len(self.logger.handlers):
             self.logger.removeHandler(self.logger.handlers[0])
         handler = logging.StreamHandler(sys.stdout if PRODUCTION else sys.stderr)
 
