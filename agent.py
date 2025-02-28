@@ -100,7 +100,7 @@ class Agent():
     sap_range: int
     """攻击范围"""
     sap_dropoff: float = 0.25
-    """攻击偏离时的伤害倍率, TODO: 估计它"""
+    """攻击偏离时的伤害倍率"""
     sap_dropoff_estimated: bool = False
 
 
@@ -116,6 +116,10 @@ class Agent():
        形状(N, RELIC_SPREAD*2+1, RELIC_SPREAD*2+1)"""
     relic_map: np.ndarray
     """遗迹得分点地图, 在`relic_nodes`更新后更新, 形状(MAP_SIZE, MAP_SIZE)"""
+    last_relic_observed: int = -1
+    """最后一次发现新遗迹中心点的时间步"""
+    explore_map: np.ndarray
+    """探索地图, 其中值表示对应格有多少回合未出现在视野内"""
 
     history: List[Observation]
     """历史观测结果, 保存至**上一个回合**"""
@@ -145,6 +149,7 @@ class Agent():
 
         self.relic_center = np.zeros((0, 2), dtype=np.int8)
         self.relic_nodes = np.zeros((0, C.RELIC_SPREAD*2+1, C.RELIC_SPREAD*2+1), dtype=np.int8)
+        self.explore_map = np.zeros((C.MAP_SIZE, C.MAP_SIZE), dtype=np.int16)
 
         self.task_list = [UnitTask(UnitTaskType.DEAD, np.zeros(2, dtype=np.int8), 0) for _ in range(C.MAX_UNITS)]
         self.sap_orders = []
@@ -171,8 +176,9 @@ class Agent():
         # 估计遗迹得分点位置
         relic_updated = self.estimate_relic_positions()
         self.update_relic_map()
-        if relic_updated:
-            self.logger.info(f"Map updated: \n{self.relic_map.T}")
+        self.logger.info("Explore map: \n" + str(self.explore_map.T))
+        # if relic_updated:
+        #     self.logger.info(f"Map updated: \n{self.relic_map.T}")
 
         # -------------------- 任务分配预处理 --------------------
 
@@ -428,11 +434,15 @@ class Agent():
         # TODO: 估计unit_energy_void_factor
 
     def update_relic_center(self) -> None:
-        """添加新发现的遗迹中心点位置
-           """
+        """添加新发现的遗迹中心点位置, 并更新explore_map"""
         obs = self.obs
+
+        # 检查是否有新的遗迹中心点
         for r_center in obs.relic_nodes[obs.relic_nodes_mask]:
             if not np.any(np.all(self.relic_center == r_center, axis=1)):
+                # 发现新的遗迹中心点
+                self.last_relic_observed = obs.step
+                self.explore_map = np.zeros((C.MAP_SIZE, C.MAP_SIZE), dtype=np.int16)
                 self.logger.info(f"New relic center: {r_center}")
                 # 新的遗迹范围若与旧的重合, 则重合部分的FAKE应该重新设为UNKNOWN
                 # 预计出现次数不多, 故使用原始实现
@@ -448,6 +458,25 @@ class Agent():
                 self.relic_center = np.vstack((self.relic_center, r_center, utils.flip_coord(r_center)))  # 对称地添加
                 self.relic_nodes = np.vstack((self.relic_nodes,
                                               np.full((2, C.RELIC_SPREAD*2+1, C.RELIC_SPREAD*2+1), RelicInfo.UNKNOWN.value)))
+
+        # 更新explore_map
+        if obs.curr_match >= 4:  # 关闭遗迹探索
+            self.explore_map = np.zeros((C.MAP_SIZE, C.MAP_SIZE), dtype=np.int16)
+            return
+        elif self.relic_center.shape[0] >= obs.curr_match * 2:  # 所有遗迹已知
+            self.explore_map = np.zeros((C.MAP_SIZE, C.MAP_SIZE), dtype=np.int16)
+            return
+        # 若上一个match中没有发现遗迹, 关闭探索
+        elif obs.curr_match - 1 > self.last_relic_observed // (C.MAX_STEPS_IN_MATCH + 1) + 1:
+            self.explore_map = np.zeros((C.MAP_SIZE, C.MAP_SIZE), dtype=np.int16)
+            return
+
+        # 本match内还没发现遗迹, 则出现概率累加
+        if obs.match_steps <= 50 and self.last_relic_observed < (C.MAX_STEPS_IN_MATCH + 1) * (obs.curr_match - 1):
+            self.explore_map += 1
+
+        # 清除视野内的未探索标记
+        self.explore_map[self.obs.sym_sensor_mask] = 0
 
     def estimate_relic_positions(self) -> bool:
         """估计遗迹得分点的位置, 返回是否有更新"""

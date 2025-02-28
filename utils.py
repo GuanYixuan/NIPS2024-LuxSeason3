@@ -20,6 +20,8 @@ class Constants:
     """游戏地图大小"""
     MAX_UNITS = 16
     """最大单位数量"""
+    MAX_STEPS_IN_MATCH = 100
+    """每场比赛的最大步数"""
     RELIC_SPREAD = 2
     """遗迹得分点相对遗迹中心点的最大单轴距离"""
 

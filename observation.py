@@ -158,3 +158,13 @@ class Observation:
     def opp_units_energy(self) -> np.ndarray:
         """对手所控制的单位能量"""
         return self.units_energy[1 - self.player_id]
+
+    @property
+    def is_match_start(self) -> bool:
+        """是否是比赛开始"""
+        return self.steps % (Constants.MAX_STEPS_IN_MATCH + 1) == 1
+
+    @property
+    def curr_match(self) -> int:
+        """当前比赛编号"""
+        return np.sum(self.team_wins) + 1
