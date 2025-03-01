@@ -199,7 +199,7 @@ class Agent():
         dists = dists[argsort]
         real_points = real_points[argsort]  # 按到基地距离排序
         real_points_near = real_points[dists <= MAX_POINT_DIST]
-        real_points_far = real_points[dists > MAX_POINT_DIST]
+        real_points_far = real_points[dists >= C.MAP_SIZE]
 
         # 根据到基地距离排序各未知点
         unknown_points = np.vstack(np.where(self.relic_map == RelicInfo.UNKNOWN.value)).T  # shape (N, 2)
@@ -276,7 +276,7 @@ class Agent():
 
         # 2. 处理未知遗迹点, 寻找距离最近的空闲单位并分配为INVESTIGATE任务
         for unknown_pos in unknown_points:
-            if len(allocated_unknown_positions) >= 8:  # 限制INVESTIGATE数量，避免难以推断
+            if len(allocated_unknown_positions) >= 5:  # 限制INVESTIGATE数量，避免难以推断
                 break
             pos_tuple = (unknown_pos[0], unknown_pos[1])
             if pos_tuple in allocated_unknown_positions:
@@ -296,6 +296,9 @@ class Agent():
         # 3. 未分配的单位执行EXPLORE任务
         MIN_PRIO = 250 if self.last_relic_observed >= 0 else 40
         for uid in range(C.MAX_UNITS):
+            if len(allocated_explore_positions) >= 5 and len(self.relic_center):  # 限制EXPLORE数量
+                break
+
             if self.task_list[uid].type != UnitTaskType.IDLE:
                 continue
 
@@ -333,6 +336,7 @@ class Agent():
             UnitTaskType.EXPLORE: 1.0,
             UnitTaskType.IDLE: 1.0,
         }
+        attack_idle_pts: Set[Tuple[int, int]] = set()
         for uid in range(C.MAX_UNITS):
             task = self.task_list[uid]
             u_selector = (self.team_id, uid)
@@ -393,17 +397,21 @@ class Agent():
                     actions[uid] = [self.game_map.direction_to(u_pos, task.target_pos, energy_weight), 0, 0]
                     continue
 
-                curr_eng = self.game_map.full_energy_map[tuple(u_pos)]
-                high_eng_mask = self.game_map.full_energy_map >= curr_eng + 3
+                high_eng_mask = np.ones_like(self.game_map.full_energy_map, dtype=bool)  # 暂时不设mask
                 high_eng_pts = np.column_stack(np.where(high_eng_mask) + (self.game_map.full_energy_map[high_eng_mask].flatten(),))
                 dists = np.max(np.abs(high_eng_pts[:, :2] - task.target_pos), axis=1)
                 mask = (MIN_ATTACK_DIST <= dists) & (dists <= MAX_ATTACK_DIST)
                 high_eng_pts = high_eng_pts[mask]
                 dists = dists[mask]
+                high_eng_pts = high_eng_pts[np.argsort(high_eng_pts[:, 2])]
 
-                if high_eng_pts.shape[0]:
-                    target_pos = high_eng_pts[np.argmax(high_eng_pts[:, 2])][:2]
+                for i in range(high_eng_pts.shape[0]):
+                    target_pos = high_eng_pts[i, :2]
+                    if (target_pos[0], target_pos[1]) in attack_idle_pts:
+                        continue
                     actions[uid] = [self.game_map.direction_to(u_pos, target_pos, energy_weight), 0, 0]
+                    attack_idle_pts.add((target_pos[0], target_pos[1]))
+                    break
 
             # IDLE任务: 在周围10格寻找能量较高点并移动过去
             elif task.type == UnitTaskType.IDLE:

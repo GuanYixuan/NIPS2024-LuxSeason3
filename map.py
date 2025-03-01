@@ -102,7 +102,7 @@ class Map:
         self.full_energy_map[self.obstacle_map == Landscape.ASTEROID.value] = -50
         self.full_energy_map[self.obstacle_map == Landscape.NEBULA.value] -= self.nebula_cost
 
-        return obstacle_unmoved, energy_unmoved
+        return not obstacle_unmoved, not energy_unmoved
 
     def direction_to(self, src: np.ndarray, dst: np.ndarray, energy_weight: float) -> int:
         """利用A*算法计算从src到dst的下一步方向"""
