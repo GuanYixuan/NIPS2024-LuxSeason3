@@ -182,15 +182,15 @@ class Agent():
         # 估计遗迹得分点位置
         relic_updated = self.estimate_relic_positions()
         self.update_relic_map()
-        if np.any(self.explore_map > 0):
-            self.logger.info("Explore map: \n" + str(self.explore_map.T))
-        # if relic_updated:
-        #     self.logger.info(f"Map updated: \n{self.relic_map.T}")
+        # if np.any(self.explore_map > 0):
+        #     self.logger.info("Explore map: \n" + str(self.explore_map.T))
+        if relic_updated:
+            self.logger.info(f"Map updated: \n{self.relic_map.T}")
 
         # -------------------- 任务分配预处理 --------------------
 
         # 根据到基地距离排序各得分点
-        MAX_POINT_DIST = C.MAP_SIZE + 7
+        MAX_POINT_DIST = C.MAP_SIZE + 3
         real_points = np.vstack(np.where(self.relic_map == RelicInfo.REAL.value)).T  # shape (N, 2)
         dists = np.sum(np.abs(real_points - self.base_pos), axis=1)
         argsort = np.argsort(dists)
@@ -255,7 +255,8 @@ class Agent():
 
             dists = np.sum(np.abs(obs.my_units_pos - real_pos), axis=1)
             free_mask = np.array([
-                t.type in (UnitTaskType.IDLE, UnitTaskType.INVESTIGATE, UnitTaskType.EXPLORE)
+                t.type in (UnitTaskType.IDLE, UnitTaskType.INVESTIGATE,
+                           UnitTaskType.EXPLORE, UnitTaskType.ATTACK)
                 for t in self.task_list])
             if not np.any(free_mask):
                 break  # 所有单位都有更高优先级任务
@@ -507,7 +508,7 @@ class Agent():
                     for dx in range(-C.RELIC_SPREAD, C.RELIC_SPREAD+1):
                         for dy in range(-C.RELIC_SPREAD, C.RELIC_SPREAD+1):
                             pos = old_center + np.array([dx, dy])
-                            if utils.in_map(pos) and np.sum(np.abs(pos - r_center)) <= C.RELIC_SPREAD:
+                            if utils.in_map(pos) and np.max(np.abs(pos - r_center)) <= C.RELIC_SPREAD:
                                 if self.relic_nodes[old_idx, dx+C.RELIC_SPREAD, dy+C.RELIC_SPREAD] == RelicInfo.FAKE.value:
                                     self.relic_nodes[old_idx, dx+C.RELIC_SPREAD, dy+C.RELIC_SPREAD] = RelicInfo.UNKNOWN.value
 
@@ -523,8 +524,8 @@ class Agent():
         elif self.relic_center.shape[0] >= obs.curr_match * 2:  # 所有遗迹已知
             self.explore_map = np.zeros((C.MAP_SIZE, C.MAP_SIZE), dtype=np.int16)
             return
-        # 若上一个match中没有发现遗迹, 关闭探索
-        elif obs.curr_match - 1 > self.last_relic_observed // (C.MAX_STEPS_IN_MATCH + 1) + 1:
+        # 若上一个match中没有发现遗迹且视野范围较大, 关闭探索
+        elif (obs.curr_match - 1 > self.last_relic_observed // (C.MAX_STEPS_IN_MATCH + 1) + 1) and (self.sensor_range > 1):
             self.explore_map = np.zeros((C.MAP_SIZE, C.MAP_SIZE), dtype=np.int16)
             return
 
