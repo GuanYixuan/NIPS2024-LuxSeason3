@@ -50,15 +50,15 @@ class Map:
 
         assert C.MAP_SIZE == obs.map_tile_type.shape[0] == obs.map_tile_type.shape[1]
 
-    def update_map(self, obs: Observation) -> None:
-        """更新地图状态"""
+    def update_map(self, obs: Observation) -> Tuple[bool, bool]:
+        """更新地图状态, 返回这一回合内obstacle_map和energy_map是否发生变化"""
 
         # 更新障碍地图
         last_visible_mask = (self.obstacle_map != Landscape.UNKNOWN.value)
         both_visible_mask = np.logical_and(last_visible_mask, obs.sym_sensor_mask)
 
-        unmoved: bool = np.array_equal(self.obstacle_map[both_visible_mask], obs.map_tile_type[both_visible_mask])
-        if unmoved:
+        obstacle_unmoved: bool = np.array_equal(self.obstacle_map[both_visible_mask], obs.map_tile_type[both_visible_mask])
+        if obstacle_unmoved:
             self.obstacle_map = np.maximum(self.obstacle_map, obs.map_tile_type)  # type: ignore
         else:
             # 障碍移动估计
@@ -87,8 +87,8 @@ class Map:
         # 更新能量地图
         last_visible_mask = (self.energy_map != C.DEFAULT_ENERGY_VALUE)
         both_visible_mask = np.logical_and(last_visible_mask, obs.sym_sensor_mask)
-        unmoved = np.array_equal(self.energy_map[both_visible_mask], obs.map_energy[both_visible_mask])
-        if unmoved:
+        energy_unmoved = np.array_equal(self.energy_map[both_visible_mask], obs.map_energy[both_visible_mask])
+        if energy_unmoved:
             self.energy_map[obs.sym_sensor_mask] = obs.map_energy[obs.sym_sensor_mask]
         else:
             if not self.energy_drift_estimated and obs.step > 2:
@@ -101,6 +101,8 @@ class Map:
         self.full_energy_map = self.energy_map.copy()
         self.full_energy_map[self.obstacle_map == Landscape.ASTEROID.value] = -50
         self.full_energy_map[self.obstacle_map == Landscape.NEBULA.value] -= self.nebula_cost
+
+        return obstacle_unmoved, energy_unmoved
 
     def direction_to(self, src: np.ndarray, dst: np.ndarray, energy_weight: float) -> int:
         """利用A*算法计算从src到dst的下一步方向"""

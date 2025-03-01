@@ -114,6 +114,8 @@ class Agent():
 
     game_map: Map
     """游戏地图"""
+    map_moved: Tuple[bool, bool]
+    """这一回合内obstacle_map和energy_map是否发生移动"""
     relic_center: np.ndarray
     """可见的遗迹中心点位置, 形状(N, 2)"""
     relic_nodes: np.ndarray
@@ -147,7 +149,7 @@ class Agent():
         self.opp_team_id = 1 if self.team_id == 0 else 0
         self.base_pos = np.full(2, 0 if self.team_id == 0 else C.MAP_SIZE-1, dtype=np.int8)
 
-        np.random.seed(0)
+        # np.random.seed(0)
         self.env_cfg = env_cfg
         self.sap_cost = self.env_cfg["unit_sap_cost"]
         self.sap_range = self.env_cfg["unit_sap_range"]
@@ -170,7 +172,7 @@ class Agent():
         self.logger.set_step(step)
 
         # 更新地图并进行参数估计
-        self.game_map.update_map(obs)
+        self.map_moved = self.game_map.update_map(obs)
         self.estimate_params()
 
         if step == 0:
@@ -222,13 +224,14 @@ class Agent():
             dup_mask = np.any(np.abs(explore_points[next_idx:, :2] - explore_points[next_idx-1, :2]) <= self.sensor_range, axis=1)
             explore_points = np.concatenate((explore_points[:next_idx], explore_points[next_idx:][~dup_mask]))
             next_idx += 1
-        if explore_points.shape[0] > 0 and explore_points[0, 2] > 0:
-            self.logger.info(f"Explore points: \n{explore_points}")
+        # if explore_points.shape[0] > 0 and explore_points[0, 2] > 0:
+        #     self.logger.info(f"Explore points: \n{explore_points}")
 
         # -------------------- 任务分配 --------------------
 
         # 主要策略
         # 0. 处理单位的出现与消失
+        explore_disabled = np.all(self.explore_map == 0)
         for uid in range(C.MAX_UNITS):
             task = self.task_list[uid]
             u_selector = (self.team_id, uid)
@@ -237,7 +240,10 @@ class Agent():
                 self.task_list[uid] = UnitTask(UnitTaskType.DEAD, np.zeros(2, dtype=np.int8), step)
                 continue
             elif obs.units_mask[u_selector] and self.task_list[uid].type == UnitTaskType.DEAD:  # 新出现的单位等待重新分配任务
-                self.task_list[uid] = UnitTask(UnitTaskType.IDLE, np.zeros(2, dtype=np.int8), step)
+                self.task_list[uid].clear()
+
+            if explore_disabled and self.task_list[uid].type == UnitTaskType.EXPLORE:  # 探索已完成时, 中断当前的探索任务
+                self.task_list[uid].clear()
 
         allocated_real_positions: Set[Tuple[int, int]] = \
             set([(t.target_pos[0], t.target_pos[1]) for t in self.task_list if t.type == UnitTaskType.CAPTURE_RELIC])
@@ -263,11 +269,15 @@ class Agent():
 
             dists[~free_mask] = 10000
             closest_uid = np.argmin(dists)
+            if dists[closest_uid] > 8 and self.task_list[closest_uid].type == UnitTaskType.ATTACK:
+                continue
             self.task_list[closest_uid] = UnitTask(UnitTaskType.CAPTURE_RELIC, real_pos, step)
             self.logger.info(f"Unit {closest_uid} -> relic {real_pos}")
 
         # 2. 处理未知遗迹点, 寻找距离最近的空闲单位并分配为INVESTIGATE任务
         for unknown_pos in unknown_points:
+            if len(allocated_unknown_positions) >= 8:  # 限制INVESTIGATE数量，避免难以推断
+                break
             pos_tuple = (unknown_pos[0], unknown_pos[1])
             if pos_tuple in allocated_unknown_positions:
                 continue
@@ -279,6 +289,7 @@ class Agent():
 
             dists[~free_mask] = 10000
             closest_uid = np.argmin(dists)
+            allocated_unknown_positions.add(pos_tuple)
             self.task_list[closest_uid] = UnitTask(UnitTaskType.INVESTIGATE, unknown_pos, step)
             self.logger.info(f"Unit {closest_uid} -> unknown {unknown_pos}")
 
@@ -347,7 +358,7 @@ class Agent():
                         continue
 
             # CAPTURE_RELIC任务: 直接走向对应目标
-            if task.type == UnitTaskType.CAPTURE_RELIC or task.type == UnitTaskType.ATTACK:
+            if task.type == UnitTaskType.CAPTURE_RELIC:
                 actions[uid] = [self.game_map.direction_to(u_pos, task.target_pos, energy_weight), 0, 0]
 
             # INVESTIGATE任务: 在未知点上来回走动
@@ -373,7 +384,28 @@ class Agent():
                 else:
                     actions[uid] = [self.game_map.direction_to(u_pos, task.target_pos, energy_weight), 0, 0]
 
-            # IDLE任务: 在周围10格寻找能量最高点并移动过去
+            # ATTACK任务: 在遗迹附近寻找能量较高点
+            elif task.type == UnitTaskType.ATTACK:
+                MIN_ATTACK_DIST = 1
+                MAX_ATTACK_DIST = self.sap_range
+
+                if np.max(np.abs(u_pos - task.target_pos)) >= MAX_ATTACK_DIST + 2 or u_energy >= 350:
+                    actions[uid] = [self.game_map.direction_to(u_pos, task.target_pos, energy_weight), 0, 0]
+                    continue
+
+                curr_eng = self.game_map.full_energy_map[tuple(u_pos)]
+                high_eng_mask = self.game_map.full_energy_map >= curr_eng + 3
+                high_eng_pts = np.column_stack(np.where(high_eng_mask) + (self.game_map.full_energy_map[high_eng_mask].flatten(),))
+                dists = np.max(np.abs(high_eng_pts[:, :2] - task.target_pos), axis=1)
+                mask = (MIN_ATTACK_DIST <= dists) & (dists <= MAX_ATTACK_DIST)
+                high_eng_pts = high_eng_pts[mask]
+                dists = dists[mask]
+
+                if high_eng_pts.shape[0]:
+                    target_pos = high_eng_pts[np.argmax(high_eng_pts[:, 2])][:2]
+                    actions[uid] = [self.game_map.direction_to(u_pos, target_pos, energy_weight), 0, 0]
+
+            # IDLE任务: 在周围10格寻找能量较高点并移动过去
             elif task.type == UnitTaskType.IDLE:
                 MAX_IDLE_DIST = 10
                 curr_eng = self.game_map.full_energy_map[tuple(u_pos)]
@@ -425,17 +457,19 @@ class Agent():
 
         # 估计移动开销后, 估计星云能量损耗
         elif not gmap.nebula_cost_estimated:
-            # 任意一个单位移动到了星云上
-            for i in range(C.MAX_UNITS):
-                unit_sel = (self.team_id, i)
-                if last_obs.units_mask[unit_sel] and self.obs.units_mask[unit_sel]:
-                    last_pos = last_obs.units_position[unit_sel]
-                    curr_pos = self.obs.units_position[unit_sel]
-                    if not np.array_equal(last_pos, curr_pos) and gmap.obstacle_map[tuple(curr_pos)] == Landscape.NEBULA.value:
-                        gmap.nebula_cost = last_obs.units_energy[unit_sel] - self.obs.units_energy[unit_sel] \
-                            + gmap.energy_map[tuple(curr_pos)] - gmap.move_cost
-                        gmap.nebula_cost_estimated = True
-                        self.logger.info(f"Nebula cost estimated: {gmap.nebula_cost}")
+            if not self.map_moved[0]:  # 本回合内地图自身移动不能算
+                # 任意一个单位移动到了星云上
+                for i in range(C.MAX_UNITS):
+                    unit_sel = (self.team_id, i)
+                    if last_obs.units_mask[unit_sel] and self.obs.units_mask[unit_sel]:
+                        last_pos = last_obs.units_position[unit_sel]
+                        curr_pos = self.obs.units_position[unit_sel]
+                        if not np.array_equal(last_pos, curr_pos) and \
+                           gmap.obstacle_map[tuple(curr_pos)] == Landscape.NEBULA.value:
+                            gmap.nebula_cost = last_obs.units_energy[unit_sel] - self.obs.units_energy[unit_sel] \
+                                + gmap.energy_map[tuple(curr_pos)] - gmap.move_cost
+                            gmap.nebula_cost_estimated = True
+                            self.logger.info(f"Nebula cost estimated: {gmap.nebula_cost}")
 
         # 此后估计sap_dropoff
         elif not self.sap_dropoff_estimated:
@@ -504,13 +538,14 @@ class Agent():
                 self.logger.info(f"New relic center: {r_center}")
                 # 新的遗迹范围若与旧的重合, 则重合部分的FAKE应该重新设为UNKNOWN
                 # 预计出现次数不多, 故使用原始实现
-                for old_idx, old_center in enumerate(self.relic_center):
-                    for dx in range(-C.RELIC_SPREAD, C.RELIC_SPREAD+1):
-                        for dy in range(-C.RELIC_SPREAD, C.RELIC_SPREAD+1):
-                            pos = old_center + np.array([dx, dy])
-                            if utils.in_map(pos) and np.max(np.abs(pos - r_center)) <= C.RELIC_SPREAD:
-                                if self.relic_nodes[old_idx, dx+C.RELIC_SPREAD, dy+C.RELIC_SPREAD] == RelicInfo.FAKE.value:
-                                    self.relic_nodes[old_idx, dx+C.RELIC_SPREAD, dy+C.RELIC_SPREAD] = RelicInfo.UNKNOWN.value
+                for new_center in (r_center, utils.flip_coord(r_center)):
+                    for old_idx, old_center in enumerate(self.relic_center):
+                        for dx in range(-C.RELIC_SPREAD, C.RELIC_SPREAD+1):
+                            for dy in range(-C.RELIC_SPREAD, C.RELIC_SPREAD+1):
+                                pos = old_center + np.array([dx, dy])
+                                if utils.in_map(pos) and np.max(np.abs(pos - new_center)) <= C.RELIC_SPREAD:
+                                    if self.relic_nodes[old_idx, dx+C.RELIC_SPREAD, dy+C.RELIC_SPREAD] == RelicInfo.FAKE.value:
+                                        self.relic_nodes[old_idx, dx+C.RELIC_SPREAD, dy+C.RELIC_SPREAD] = RelicInfo.UNKNOWN.value
 
                 # 添加新的遗迹中心点
                 self.relic_center = np.vstack((self.relic_center, r_center, utils.flip_coord(r_center)))  # 对称地添加
@@ -661,7 +696,7 @@ class Agent():
         if real_points_invisible.shape[0] > 0:
             possibility: float = (obs.team_points[self.opp_team_id] - self.history[-1].team_points[self.opp_team_id])
             possibility = min(1.0, (possibility - len(visible_enemy_on_relic)) / real_points_invisible.shape[0])
-            self.logger.info("Possibility of invisible relics: {} / {} = {}".format(
+            self.logger.debug("Possibility of invisible relics: {} / {} = {}".format(
                 possibility * real_points_invisible.shape[0], real_points_invisible.shape[0], possibility))
             for r_pos in real_points_invisible:
                 self.sap_orders.append(SapOrder(r_pos, ON_RELIC_WEIGHT * possibility, 1))
