@@ -221,7 +221,8 @@ class Agent():
             dup_mask = np.any(np.abs(explore_points[next_idx:, :2] - explore_points[next_idx-1, :2]) <= self.sensor_range, axis=1)
             explore_points = np.concatenate((explore_points[:next_idx], explore_points[next_idx:][~dup_mask]))
             next_idx += 1
-        self.logger.info(f"Explore points: \n{explore_points}")
+        if explore_points.shape[0] > 0 and explore_points[0, 2] > 0:
+            self.logger.info(f"Explore points: \n{explore_points}")
 
         # -------------------- 任务分配 --------------------
 
@@ -237,12 +238,15 @@ class Agent():
             elif obs.units_mask[u_selector] and self.task_list[uid].type == UnitTaskType.DEAD:  # 新出现的单位等待重新分配任务
                 self.task_list[uid] = UnitTask(UnitTaskType.NOT_ALLOCATED, np.zeros(2, dtype=np.int8), step)
 
-        # 1. 从各个较近的遗迹得分点出发, 寻找最近的空闲单位并分配为CAPTURE_RELIC任务
-        actions = np.zeros((C.MAX_UNITS, 3), dtype=int)
         allocated_real_positions: Set[Tuple[int, int]] = \
             set([(t.target_pos[0], t.target_pos[1]) for t in self.task_list if t.type == UnitTaskType.CAPTURE_RELIC])
         allocated_unknown_positions: Set[Tuple[int, int]] = \
             set([(t.target_pos[0], t.target_pos[1]) for t in self.task_list if t.type == UnitTaskType.INVESTIGATE])
+        allocated_explore_positions: Set[Tuple[int, int]] = \
+            set([(t.target_pos[0], t.target_pos[1]) for t in self.task_list if t.type == UnitTaskType.EXPLORE])
+
+        # 1. 从各个较近的遗迹得分点出发, 寻找最近的空闲单位并分配为CAPTURE_RELIC任务
+        actions = np.zeros((C.MAX_UNITS, 3), dtype=int)
         for real_pos in real_points_near:
             pos_tuple = (real_pos[0], real_pos[1])
             if pos_tuple in allocated_real_positions:
@@ -276,31 +280,33 @@ class Agent():
             self.task_list[closest_uid] = UnitTask(UnitTaskType.INVESTIGATE, unknown_pos, step)
             self.logger.info(f"Unit {closest_uid} -> unknown {unknown_pos}")
 
-        # 3. 空闲单位走向较远的遗迹得分点
-        for real_pos in real_points_far:
-            pos_tuple = (real_pos[0], real_pos[1])
-            if pos_tuple in allocated_real_positions:
+        # 3. 未分配的单位执行EXPLORE任务
+        MIN_PRIO = 250 if self.last_relic_observed >= 0 else 40
+        for uid in range(C.MAX_UNITS):
+            if self.task_list[uid].type != UnitTaskType.NOT_ALLOCATED:
                 continue
 
-            dists = np.sum(np.abs(obs.my_units_pos - real_pos), axis=1)
-            free_mask = np.array([t.type == UnitTaskType.NOT_ALLOCATED for t in self.task_list])
-            if not np.any(free_mask):
-                break  # 所有单位都有更高优先级任务
+            for i in range(explore_points.shape[0]):
+                t_pos = explore_points[i, :2].copy().astype(int)
+                prio = float(explore_points[i, 2])
+                if prio < MIN_PRIO:
+                    break  # 优先级太低的点不考虑
+                if (int(t_pos[0]), int(t_pos[1])) in allocated_explore_positions:
+                    continue
 
-            dists[~free_mask] = 10000
-            closest_uid = np.argmin(dists)
-            self.task_list[closest_uid] = UnitTask(UnitTaskType.CAPTURE_RELIC, real_pos, step)
-            self.logger.info(f"Unit {closest_uid} -> relic far {real_pos}")
-
-        # 4. 最后未分配的单位执行EXPLORE任务
-        for uid in range(C.MAX_UNITS):
-            if self.task_list[uid].type == UnitTaskType.NOT_ALLOCATED:
-                t_pos = np.array([np.random.randint(0, C.MAP_SIZE), np.random.randint(0, C.MAP_SIZE)])
-                if np.sum(np.abs(t_pos - self.base_pos)) > C.MAP_SIZE:
-                    t_pos = utils.flip_coord(t_pos)  # 确保探索点在我方半区
-
+                np.delete(explore_points, i, axis=0)
                 self.task_list[uid] = UnitTask(UnitTaskType.EXPLORE, t_pos, step)
                 self.logger.info(f"Unit {uid} -> explore {t_pos}")
+                break
+
+        # 4. 空闲单位走向较远的遗迹得分点, 不再去重
+        for uid in range(C.MAX_UNITS):
+            if self.task_list[uid].type != UnitTaskType.NOT_ALLOCATED:
+                continue
+
+            tgt = real_points_far[np.random.choice(real_points_far.shape[0])]
+            self.task_list[closest_uid] = UnitTask(UnitTaskType.ATTACK, tgt, step)
+            self.logger.info(f"Unit {closest_uid} -> relic far {tgt}")
 
         # 输出统计信息
         # self.logger.info("Task list: \n%s" % "\n".join(["%d: %s" % (i, str(t)) for i, t in enumerate(self.task_list)]))
@@ -309,7 +315,9 @@ class Agent():
         MIN_SAP_PRIORITY: Dict[UnitTaskType, float] = {
             UnitTaskType.CAPTURE_RELIC: 4.5,
             UnitTaskType.INVESTIGATE: 3.0,
-            UnitTaskType.EXPLORE: 1.0
+            UnitTaskType.ATTACK: 2.0,
+            UnitTaskType.EXPLORE: 1.0,
+            UnitTaskType.NOT_ALLOCATED: 1.0,
         }
         for uid in range(C.MAX_UNITS):
             task = self.task_list[uid]
@@ -336,7 +344,7 @@ class Agent():
                         continue
 
             # CAPTURE_RELIC任务: 直接走向对应目标
-            if task.type == UnitTaskType.CAPTURE_RELIC:
+            if task.type == UnitTaskType.CAPTURE_RELIC or task.type == UnitTaskType.ATTACK:
                 actions[uid] = [self.game_map.direction_to(u_pos, task.target_pos, energy_weight), 0, 0]
 
             # INVESTIGATE任务: 在未知点上来回走动
@@ -685,26 +693,27 @@ class Agent():
         MAX_DIST = 7
         real_points_myhalf = np.vstack(np.where(self.relic_map == RelicInfo.REAL.value)).T
         real_points_myhalf = real_points_myhalf[np.sum(np.abs(real_points_myhalf - self.base_pos), axis=1) <= C.MAP_SIZE]
-        real_point_deltas = real_points_myhalf - curr_pos
-        dists = np.sum(np.abs(real_point_deltas), axis=1)
-        real_point_deltas = (real_point_deltas[(dists <= MAX_DIST) & (dists > 0)]).astype(np.float32)
-        real_point_deltas /= np.linalg.norm(real_point_deltas, axis=1, keepdims=True)
+        if real_points_myhalf.shape[0] > 0:
+            real_point_deltas = real_points_myhalf - curr_pos
+            dists = np.sum(np.abs(real_point_deltas), axis=1)
+            real_point_deltas = (real_point_deltas[(dists <= MAX_DIST) & (dists > 0)]).astype(np.float32)
+            real_point_deltas /= np.linalg.norm(real_point_deltas, axis=1, keepdims=True)
 
-        best_dir: Optional[np.ndarray] = None
-        best_score = 0.0
-        for angle in np.linspace(0, 2*np.pi, 20, endpoint=False):
-            proj_deltas = np.dot(real_point_deltas, np.array([np.cos(angle), np.sin(angle)]))
-            score = np.sum(proj_deltas >= 0) - np.sum(proj_deltas < 0) * 3 + np.mean(proj_deltas) * 0.5
-            if score > best_score:
-                best_dir = np.array([np.cos(angle), np.sin(angle)])
-                best_score = score
+            best_dir: Optional[np.ndarray] = None
+            best_score = 0.0
+            for angle in np.linspace(0, 2*np.pi, 20, endpoint=False):
+                proj_deltas = np.dot(real_point_deltas, np.array([np.cos(angle), np.sin(angle)]))
+                score = np.sum(proj_deltas >= 0) - np.sum(proj_deltas < 0) * 3 + np.mean(proj_deltas) * 0.5
+                if score > best_score:
+                    best_dir = np.array([np.cos(angle), np.sin(angle)])
+                    best_score = score
 
-        RELIC_CRIT_WEIGHT = 1.0
-        if best_dir is not None:
-            # 投影到各个方向
-            dots = np.dot(C.ADJACENT_DELTAS, best_dir)
-            dir_scores += dots * (dots > 0) * RELIC_CRIT_WEIGHT
-            self.logger.info(f"Predict enemy {eid} direction after relic_crit: {dir_scores}, best_dir: {best_dir}")
+            RELIC_CRIT_WEIGHT = 1.0
+            if best_dir is not None:
+                # 投影到各个方向
+                dots = np.dot(C.ADJACENT_DELTAS, best_dir)
+                dir_scores += dots * (dots > 0) * RELIC_CRIT_WEIGHT
+                self.logger.info(f"Predict enemy {eid} direction after relic_crit: {dir_scores}, best_dir: {best_dir}")
 
         # TODO: 单位在得分点上
 
