@@ -182,10 +182,10 @@ class Agent():
         # 估计遗迹得分点位置
         relic_updated = self.estimate_relic_positions()
         self.update_relic_map()
-        # if np.any(self.explore_map > 0):
+        # if np.any(self.explore_map > 5):
         #     self.logger.info("Explore map: \n" + str(self.explore_map.T))
-        if relic_updated:
-            self.logger.info(f"Map updated: \n{self.relic_map.T}")
+        # if relic_updated:
+        #     self.logger.info(f"Map updated: \n{self.relic_map.T}")
 
         # -------------------- 任务分配预处理 --------------------
 
@@ -616,6 +616,9 @@ class Agent():
         real_points = np.vstack(np.where(self.relic_map == RelicInfo.REAL.value)).T  # shape (N, 2)
         dists = np.sum(np.abs(real_points - self.base_pos), axis=1)
         real_points_myhalf = real_points[dists <= C.MAP_SIZE]  # 我方半区得分点
+        # 针对可见敌人生成SapOrder
+        ON_RELIC_WEIGHT = 3.0
+        visible_enemy_on_relic: Set[Tuple[int, int]] = set()
         for eid, e_pos, e_energy in zip(range(C.MAX_UNITS), obs.opp_units_pos, obs.opp_units_energy):
             enemy_can_move = (e_energy >= self.game_map.move_cost)
             if not obs.units_mask[self.team_id, eid] or e_energy < 0:
@@ -633,7 +636,8 @@ class Agent():
             # 2. 在得分点上
             on_relic = (self.relic_map[tuple(e_pos)] == RelicInfo.REAL.value)
             if on_relic:
-                priority += 3.0
+                priority += ON_RELIC_WEIGHT
+                visible_enemy_on_relic.add((e_pos[0], e_pos[1]))
 
             # 3. 能量较低
             need_hit_count = int(e_energy / self.sap_cost) + 1
@@ -651,6 +655,16 @@ class Agent():
             # TODO: 融合多个相邻的SapOrder
             safe_hit_count = need_hit_count + 0 if (self.sap_dropoff == 1 or not enemy_can_move) else 1
             self.sap_orders.append(SapOrder(e_pos, priority, safe_hit_count))
+
+        # 针对不在视野内的得分点生成SapOrder
+        real_points_invisible = real_points[obs.sensor_mask[real_points[:, 0], real_points[:, 1]] == 0]
+        if real_points_invisible.shape[0] > 0:
+            possibility: float = (obs.team_points[self.opp_team_id] - self.history[-1].team_points[self.opp_team_id])
+            possibility = min(1.0, (possibility - len(visible_enemy_on_relic)) / real_points_invisible.shape[0])
+            self.logger.info("Possibility of invisible relics: {} / {} = {}".format(
+                possibility * real_points_invisible.shape[0], real_points_invisible.shape[0], possibility))
+            for r_pos in real_points_invisible:
+                self.sap_orders.append(SapOrder(r_pos, ON_RELIC_WEIGHT * possibility, 1))
 
         # 累加处于同一位置上的SapOrder的优先级
         self.sap_orders.sort(key=lambda x: (x.target_pos[0], x.target_pos[1], x.priority), reverse=True)  # 位置相同时按优先级降序排列
