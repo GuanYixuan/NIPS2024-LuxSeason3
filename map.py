@@ -23,6 +23,8 @@ class Map:
     """障碍地图, 数值依照Landscape枚举设置"""
     energy_map: _NDArray[Shape["(MAP_SIZE, MAP_SIZE)"], np.int8]
     """能量地图, 未知值设为0"""
+    full_energy_map: _NDArray[Shape["(MAP_SIZE, MAP_SIZE)"], np.int8]
+    """完整能量地图, 考虑了障碍的影响"""
 
     move_cost: int = 5
     """移动代价, 默认取最大可能值"""
@@ -94,6 +96,11 @@ class Map:
                 self.energy_drift_estimated = True
                 self.logger.info("Energy drift estimated, speed: %.3f" % self.energy_drift_speed)
             self.energy_map = obs.map_energy.copy()  # 目前直接更新能量地图
+
+        # 更新完整能量地图
+        self.full_energy_map = self.energy_map.copy()
+        self.full_energy_map[self.obstacle_map == Landscape.ASTEROID.value] = -50
+        self.full_energy_map[self.obstacle_map == Landscape.NEBULA.value] -= self.nebula_cost
 
     def direction_to(self, src: np.ndarray, dst: np.ndarray, energy_weight: float) -> int:
         """利用A*算法计算从src到dst的下一步方向"""

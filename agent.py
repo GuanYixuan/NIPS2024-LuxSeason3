@@ -19,7 +19,8 @@ class RelicInfo(Enum):
 class UnitTaskType(Enum):
     """单位任务类型"""
     DEAD = -1
-    NOT_ALLOCATED = 0
+    IDLE = 0
+    """就近寻找能量高点等待"""
     CAPTURE_RELIC = 1
     """在指定的遗迹得分点上保持不动得分"""
     INVESTIGATE = 2
@@ -51,7 +52,7 @@ class UnitTask:
         return f"({self.type.name}, {self.target_pos})"
 
     def clear(self) -> None:
-        self.type = UnitTaskType.NOT_ALLOCATED
+        self.type = UnitTaskType.IDLE
         self.target_pos = np.zeros(2, dtype=np.int8)
         self.start_step = 0
         self.data.clear()
@@ -208,8 +209,8 @@ class Agent():
 
         # 选出值得探索的目标点
         K_SIZE = 5
-        explore_values: np.ndarray = convolve2d(self.explore_map, np.ones((K_SIZE, K_SIZE)), mode='valid')
-        coords = np.meshgrid(np.arange(C.MAP_SIZE-K_SIZE+1) + K_SIZE//2, np.arange(C.MAP_SIZE-K_SIZE+1) + K_SIZE//2)
+        explore_values: np.ndarray = convolve2d(self.explore_map, np.ones((K_SIZE, K_SIZE)), mode='same')
+        coords = np.meshgrid(np.arange(C.MAP_SIZE), np.arange(C.MAP_SIZE))
         explore_points = np.column_stack((coords[0].flatten(), coords[1].flatten(), explore_values.flatten()))  # shape (N, 3)
         explore_points = explore_points[np.sum(np.abs(explore_points[:, :2] - self.base_pos), axis=1) < C.MAP_SIZE]
         explore_pri = explore_points[:, 2] + 0.01 * np.sum(np.abs(explore_points[:, :2] - self.base_pos), axis=1)
@@ -236,7 +237,7 @@ class Agent():
                 self.task_list[uid] = UnitTask(UnitTaskType.DEAD, np.zeros(2, dtype=np.int8), step)
                 continue
             elif obs.units_mask[u_selector] and self.task_list[uid].type == UnitTaskType.DEAD:  # 新出现的单位等待重新分配任务
-                self.task_list[uid] = UnitTask(UnitTaskType.NOT_ALLOCATED, np.zeros(2, dtype=np.int8), step)
+                self.task_list[uid] = UnitTask(UnitTaskType.IDLE, np.zeros(2, dtype=np.int8), step)
 
         allocated_real_positions: Set[Tuple[int, int]] = \
             set([(t.target_pos[0], t.target_pos[1]) for t in self.task_list if t.type == UnitTaskType.CAPTURE_RELIC])
@@ -254,7 +255,7 @@ class Agent():
 
             dists = np.sum(np.abs(obs.my_units_pos - real_pos), axis=1)
             free_mask = np.array([
-                t.type in (UnitTaskType.NOT_ALLOCATED, UnitTaskType.INVESTIGATE, UnitTaskType.EXPLORE)
+                t.type in (UnitTaskType.IDLE, UnitTaskType.INVESTIGATE, UnitTaskType.EXPLORE)
                 for t in self.task_list])
             if not np.any(free_mask):
                 break  # 所有单位都有更高优先级任务
@@ -271,7 +272,7 @@ class Agent():
                 continue
 
             dists = np.sum(np.abs(obs.my_units_pos - unknown_pos), axis=1)
-            free_mask = np.array([t.type == UnitTaskType.NOT_ALLOCATED for t in self.task_list])
+            free_mask = np.array([t.type == UnitTaskType.IDLE for t in self.task_list])
             if not np.any(free_mask):
                 break  # 所有单位都有更高优先级任务
 
@@ -283,7 +284,7 @@ class Agent():
         # 3. 未分配的单位执行EXPLORE任务
         MIN_PRIO = 250 if self.last_relic_observed >= 0 else 40
         for uid in range(C.MAX_UNITS):
-            if self.task_list[uid].type != UnitTaskType.NOT_ALLOCATED:
+            if self.task_list[uid].type != UnitTaskType.IDLE:
                 continue
 
             for i in range(explore_points.shape[0]):
@@ -300,13 +301,14 @@ class Agent():
                 break
 
         # 4. 空闲单位走向较远的遗迹得分点, 不再去重
-        for uid in range(C.MAX_UNITS):
-            if self.task_list[uid].type != UnitTaskType.NOT_ALLOCATED:
-                continue
+        if real_points_far.shape[0] > 0:
+            for uid in range(C.MAX_UNITS):
+                if self.task_list[uid].type != UnitTaskType.IDLE:
+                    continue
 
-            tgt = real_points_far[np.random.choice(real_points_far.shape[0])]
-            self.task_list[closest_uid] = UnitTask(UnitTaskType.ATTACK, tgt, step)
-            self.logger.info(f"Unit {closest_uid} -> relic far {tgt}")
+                tgt = real_points_far[np.random.choice(real_points_far.shape[0])]
+                self.task_list[uid] = UnitTask(UnitTaskType.ATTACK, tgt, step)
+                self.logger.info(f"Unit {uid} -> relic far {tgt}")
 
         # 输出统计信息
         # self.logger.info("Task list: \n%s" % "\n".join(["%d: %s" % (i, str(t)) for i, t in enumerate(self.task_list)]))
@@ -317,7 +319,7 @@ class Agent():
             UnitTaskType.INVESTIGATE: 3.0,
             UnitTaskType.ATTACK: 2.0,
             UnitTaskType.EXPLORE: 1.0,
-            UnitTaskType.NOT_ALLOCATED: 1.0,
+            UnitTaskType.IDLE: 1.0,
         }
         for uid in range(C.MAX_UNITS):
             task = self.task_list[uid]
@@ -369,6 +371,20 @@ class Agent():
                     task.clear()
                 else:
                     actions[uid] = [self.game_map.direction_to(u_pos, task.target_pos, energy_weight), 0, 0]
+
+            # IDLE任务: 在周围10格寻找能量最高点并移动过去
+            elif task.type == UnitTaskType.IDLE:
+                MAX_IDLE_DIST = 10
+                curr_eng = self.game_map.full_energy_map[tuple(u_pos)]
+                high_eng_mask = self.game_map.full_energy_map >= curr_eng + 3
+                high_eng_pts = np.column_stack(np.where(high_eng_mask) + (self.game_map.full_energy_map[high_eng_mask].flatten(),))
+                dists = np.sum(np.abs(high_eng_pts[:, :2] - u_pos), axis=1)
+                high_eng_pts = high_eng_pts[dists <= MAX_IDLE_DIST]
+                dists = dists[dists <= MAX_IDLE_DIST]
+
+                if high_eng_pts.shape[0]:
+                    target_pos = high_eng_pts[np.argmax(high_eng_pts[:, 2])][:2]
+                    actions[uid] = [self.game_map.direction_to(u_pos, target_pos, energy_weight), 0, 0]
 
         # 保存历史观测结果
         self.history.append(obs)
