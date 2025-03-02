@@ -139,7 +139,7 @@ class Map:
 
         # 启发函数
         def heuristic(pos: np.ndarray) -> float:
-            return np.abs(pos[0] - dst[0]) + np.abs(pos[1] - dst[1])
+            return np.sum(np.abs(pos - dst)) * 0.3
 
         # 初始化数组
         closed_array = np.zeros((C.MAP_SIZE, C.MAP_SIZE), dtype=bool)
@@ -151,13 +151,14 @@ class Map:
         came_from[src[0], src[1]] = src  # 起点的父节点是自己
 
         start: Tuple[int, int] = tuple(src)
-        open_queue = [(heuristic(src), 0.0, start)]  # (f_score, g_score, current)
+        # 在队列中添加步数信息：
+        open_queue = [(heuristic(src), 0.0, 0, start)]  # (f_score, g_score, steps, current)
         heapq.heapify(open_queue)
 
         DIR_ARRAY = C.DIRECTIONS.copy() if np.random.randint(0, 2) else C.DIRECTIONS[::-1].copy()  # 随机选择方向顺序
         while open_queue:
             # 获取f_score最小的节点
-            f_score, g_score, current = heapq.heappop(open_queue)
+            f_score, g_score, steps, current = heapq.heappop(open_queue)
             current_pos = np.array(current)
 
             # 使用数组索引检查节点是否已访问
@@ -200,13 +201,15 @@ class Map:
                     continue
 
                 move_cost = 1 + (self.nebula_cost if landscape == Landscape.NEBULA.value else 0) / self.move_cost
-                tentative_g_score: float = g_score + max(0, move_cost - self.energy_map[next_pos] * energy_weight)  # type: ignore
+                # 根据步数决定是否考虑能量图
+                energy_factor = self.energy_map[next_pos] * energy_weight if steps <= 8 else 0
+                tentative_g_score: float = g_score + max(0, move_cost - energy_factor)  # type: ignore
 
                 if tentative_g_score < g_scores[next_pos]:
                     g_scores[next_pos] = tentative_g_score
-                    f_score = tentative_g_score + heuristic(neighbor) * 0.3  # heuristic量纲为1
+                    f_score = tentative_g_score + heuristic(neighbor)
                     came_from[next_pos] = current_pos
-                    heapq.heappush(open_queue, (f_score, tentative_g_score, next_pos))
+                    heapq.heappush(open_queue, (f_score, tentative_g_score, steps + 1, next_pos))
 
         # 如果没有找到路径，返回朝向目标的简单方向
         self.logger.warning(f"No path found from {src} to {dst}")
