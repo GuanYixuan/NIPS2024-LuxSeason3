@@ -46,6 +46,10 @@ class Constants:
 
     POSSIBLE_SAP_DROPOFF = np.array([0.25, 0.5, 1])
 
+def get_dir_index(delta: np.ndarray) -> int:
+    """根据相邻坐标delta返回游戏方向值"""
+    return np.where(np.all(Constants.DIRECTIONS == delta, axis=1))[0][0] + 1
+
 def in_map(pos: np.ndarray) -> Union[np.bool_, np.ndarray]:
     """判断输入的坐标是否在游戏地图内, pos形状如(..., 2)"""
     return np.all(np.logical_and(pos >= 0, pos < Constants.MAP_SIZE), axis=-1)

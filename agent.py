@@ -193,16 +193,20 @@ class Agent():
 
         # 根据到基地距离排序各得分点
         MAX_POINT_DIST = C.MAP_SIZE + 3
-        real_points = np.vstack(np.where(self.relic_map == RelicInfo.REAL.value)).T  # shape (N, 2)
+        real_points = np.vstack(np.where(
+            (self.relic_map == RelicInfo.REAL.value) & (self.game_map.obstacle_map != Landscape.ASTEROID.value)
+        )).T  # shape (N, 2)
         dists = np.sum(np.abs(real_points - self.base_pos), axis=1)
-        argsort = np.argsort(dists)
+        argsort = np.argsort(dists - 0.5 * self.game_map.energy_map[real_points[:, 0], real_points[:, 1]])  # 综合距离与能量排序
         dists = dists[argsort]
         real_points = real_points[argsort]  # 按到基地距离排序
         real_points_near = real_points[dists <= MAX_POINT_DIST]
         real_points_far = real_points[dists >= C.MAP_SIZE]
 
         # 根据到基地距离排序各未知点
-        unknown_points = np.vstack(np.where(self.relic_map == RelicInfo.UNKNOWN.value)).T  # shape (N, 2)
+        unknown_points = np.vstack(np.where(
+            (self.relic_map == RelicInfo.UNKNOWN.value) & (self.game_map.obstacle_map != Landscape.ASTEROID.value)
+        )).T  # shape (N, 2)
         dists = np.sum(np.abs(unknown_points - self.base_pos), axis=1)
         unknown_points = unknown_points[dists <= C.MAP_SIZE]  # 只需要排查我方半区的未知点
         unknown_points = unknown_points[np.argsort(dists[dists <= C.MAP_SIZE])]  # 按到基地距离排序
@@ -333,7 +337,7 @@ class Agent():
             UnitTaskType.CAPTURE_RELIC: 4.5,
             UnitTaskType.INVESTIGATE: 3.0,
             UnitTaskType.ATTACK: 2.0,
-            UnitTaskType.EXPLORE: 1.0,
+            UnitTaskType.EXPLORE: 2.0,
             UnitTaskType.IDLE: 1.0,
         }
         attack_idle_pts: Set[Tuple[int, int]] = set()
@@ -672,15 +676,17 @@ class Agent():
             # 按条件累加优先级
             # 1. 在我方半区得分点附近
             if real_points_myhalf.shape[0] > 0:
-                min_dist = np.min(np.sum(np.abs(real_points_myhalf - e_pos), axis=1))
-                if min_dist <= 7:
-                    priority += min(7 - min_dist, 3.0) + 1.0
+                min_dist = np.min(np.abs(real_points_myhalf - e_pos))
+                if min_dist <= self.sap_range:
+                    priority += min(self.sap_range - min_dist, 3.0) + 2.0
 
             # 2. 在得分点上
             on_relic = (self.relic_map[tuple(e_pos)] == RelicInfo.REAL.value)
             if on_relic:
                 priority += ON_RELIC_WEIGHT
                 visible_enemy_on_relic.add((e_pos[0], e_pos[1]))
+            elif e_energy == 0:
+                continue  # 无能量且不在得分点上的敌人可放置以拖延时间
 
             # 3. 能量较低
             need_hit_count = int(e_energy / self.sap_cost) + 1
@@ -700,12 +706,16 @@ class Agent():
             self.sap_orders.append(SapOrder(e_pos, priority, safe_hit_count))
 
         # 针对不在视野内的得分点生成SapOrder
+        unknown_points = np.vstack(np.where(self.relic_map == RelicInfo.UNKNOWN.value)).T
+        unknown_points_invisible = unknown_points[obs.sensor_mask[unknown_points[:, 0], unknown_points[:, 1]] == 0]
         real_points_invisible = real_points[obs.sensor_mask[real_points[:, 0], real_points[:, 1]] == 0]
         if real_points_invisible.shape[0] > 0:
             possibility: float = (obs.team_points[self.opp_team_id] - self.history[-1].team_points[self.opp_team_id])
-            possibility = min(1.0, (possibility - len(visible_enemy_on_relic)) / real_points_invisible.shape[0])
-            self.logger.debug("Possibility of invisible relics: {} / {} = {}".format(
-                possibility * real_points_invisible.shape[0], real_points_invisible.shape[0], possibility))
+            possibility -= len(visible_enemy_on_relic)
+            possibility = min(1.0, possibility / (real_points_invisible.shape[0] + 0.4 * unknown_points_invisible.shape[0]))
+            self.logger.info("Possibility of invisible relics: {} / {} = {}".format(
+                possibility * (real_points_invisible.shape[0] + 0.4 * unknown_points_invisible.shape[0]),
+                (real_points_invisible.shape[0] + 0.4 * unknown_points_invisible.shape[0]), possibility))
             for r_pos in real_points_invisible:
                 self.sap_orders.append(SapOrder(r_pos, ON_RELIC_WEIGHT * possibility, 1))
 
@@ -844,9 +854,9 @@ class Agent():
         steps = energy // move_cost
 
         if energy < 100 or steps < 20:
-            return 0.2
+            return 0.3
         elif energy < 250:
-            return 0.15
+            return 0.2
         elif energy < 350:
             return 0.10
         else:
