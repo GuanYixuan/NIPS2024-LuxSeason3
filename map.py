@@ -82,7 +82,16 @@ class Map:
                                  (self.nebula_drift_direction, self.nebula_drift_speed))
             else:
                 rolled_map = np.roll(self.obstacle_map, np.array((1, -1)) * self.nebula_drift_direction, (0, 1))
-                self.obstacle_map = np.maximum(rolled_map, obs.map_tile_type)  # type: ignore
+                # Assert
+                both_visible_mask = np.logical_and(rolled_map != Landscape.UNKNOWN.value, obs.sym_sensor_mask)
+                if not np.array_equal(rolled_map[both_visible_mask], obs.map_tile_type[both_visible_mask]):
+                    self.logger.warning("Nebula drift estimation failed! Resetting...")
+                    self.obstacle_map = obs.map_tile_type.copy()
+                    self.nebula_drift_estimated = False
+                    self.nebula_drift_speed = -1  # 重置速度（TODO: 虽然第二次估计时这会是错的）
+                    self.nebula_drift_direction = -1
+                else:
+                    self.obstacle_map = np.maximum(rolled_map, obs.map_tile_type)  # type: ignore
 
         # 更新能量地图
         last_visible_mask = (self.energy_map != C.DEFAULT_ENERGY_VALUE)
