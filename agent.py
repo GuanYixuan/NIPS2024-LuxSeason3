@@ -184,6 +184,7 @@ class Agent():
         # 估计遗迹得分点位置
         relic_updated = self.estimate_relic_positions()
         self.update_relic_map()
+        self.logger.info(f"obstacle_map: \n{self.game_map.obstacle_map.T}")
         # if np.any(self.explore_map > 5):
         #     self.logger.info("Explore map: \n" + str(self.explore_map.T))
         # if relic_updated:
@@ -193,23 +194,26 @@ class Agent():
 
         # 根据到基地距离排序各得分点
         MAX_POINT_DIST = C.MAP_SIZE + 3
+        CAPT_RELIC_ENG_WEIGHT = 0.5
         real_points = np.vstack(np.where(
             (self.relic_map == RelicInfo.REAL.value) & (self.game_map.obstacle_map != Landscape.ASTEROID.value)
         )).T  # shape (N, 2)
         dists = np.sum(np.abs(real_points - self.base_pos), axis=1)
-        argsort = np.argsort(dists - 0.5 * self.game_map.energy_map[real_points[:, 0], real_points[:, 1]])  # 综合距离与能量排序
+        argsort = np.argsort(dists - CAPT_RELIC_ENG_WEIGHT * self.game_map.energy_map[real_points[:, 0], real_points[:, 1]])
         dists = dists[argsort]
-        real_points = real_points[argsort]  # 按到基地距离排序
+        real_points = real_points[argsort]  # 按到基地距离和能量排序
         real_points_near = real_points[dists <= MAX_POINT_DIST]
-        real_points_far = real_points[dists >= C.MAP_SIZE]
 
         # 根据到基地距离排序各未知点
+        INVEST_ENG_WEIGHT = 1
         unknown_points = np.vstack(np.where(
             (self.relic_map == RelicInfo.UNKNOWN.value) & (self.game_map.obstacle_map != Landscape.ASTEROID.value)
         )).T  # shape (N, 2)
         dists = np.sum(np.abs(unknown_points - self.base_pos), axis=1)
+        argsort = np.argsort(dists - INVEST_ENG_WEIGHT * self.game_map.energy_map[unknown_points[:, 0], unknown_points[:, 1]])
+        dists = dists[argsort]
+        unknown_points = unknown_points[argsort]  # 按到基地距离和能量排序
         unknown_points = unknown_points[dists <= C.MAP_SIZE]  # 只需要排查我方半区的未知点
-        unknown_points = unknown_points[np.argsort(dists[dists <= C.MAP_SIZE])]  # 按到基地距离排序
 
         self.generate_sap_order()
 
@@ -219,6 +223,9 @@ class Agent():
         coords = np.meshgrid(np.arange(C.MAP_SIZE), np.arange(C.MAP_SIZE))
         explore_points = np.column_stack((coords[0].flatten(), coords[1].flatten(), explore_values.flatten()))  # shape (N, 3)
         explore_points = explore_points[np.sum(np.abs(explore_points[:, :2] - self.base_pos), axis=1) < C.MAP_SIZE]
+        explore_points = explore_points[
+            self.game_map.obstacle_map[tuple(explore_points[:, :2].astype(int).T)] != Landscape.ASTEROID.value
+        ]
         explore_pri = explore_points[:, 2] + 0.01 * np.sum(np.abs(explore_points[:, :2] - self.base_pos), axis=1)
         explore_points = explore_points[np.argsort(-explore_pri)]  # 按优先级排序
 
@@ -280,7 +287,7 @@ class Agent():
 
         # 2. 处理未知遗迹点, 寻找距离最近的空闲单位并分配为INVESTIGATE任务
         for unknown_pos in unknown_points:
-            if len(allocated_unknown_positions) >= 5:  # 限制INVESTIGATE数量，避免难以推断
+            if len(allocated_unknown_positions) >= 4:  # 限制INVESTIGATE数量，避免难以推断
                 break
             pos_tuple = (unknown_pos[0], unknown_pos[1])
             if pos_tuple in allocated_unknown_positions:
@@ -320,6 +327,8 @@ class Agent():
                 break
 
         # 4. 空闲单位走向较远的遗迹得分点, 不再去重
+        real_points = np.column_stack(np.where(self.relic_map == RelicInfo.REAL.value))
+        real_points_far = real_points[np.sum(np.abs(real_points - self.base_pos), axis=1) >= C.MAP_SIZE]
         if real_points_far.shape[0] > 0:
             for uid in range(C.MAX_UNITS):
                 if self.task_list[uid].type != UnitTaskType.IDLE:
@@ -369,8 +378,7 @@ class Agent():
                 continue
 
             # 判断是否进行Sap攻击
-            can_sap_count = int(u_energy / self.sap_cost)
-            if can_sap_count >= 1:
+            if u_energy >= 1.5 * self.sap_cost:
                 saps_in_range_mask = np.array([
                     np.max(np.abs(u_pos - sap.target_pos)) <= self.sap_range and not sap.satisfied()
                     for sap in self.sap_orders
@@ -387,6 +395,9 @@ class Agent():
 
             # CAPTURE_RELIC任务: 直接走向对应目标
             if task.type == UnitTaskType.CAPTURE_RELIC:
+                if not np.array_equal(u_pos, task.target_pos) and \
+                   self.game_map.obstacle_map[tuple(task.target_pos)] == Landscape.ASTEROID.value:
+                    task.clear()
                 actions[uid] = [self.game_map.direction_to(u_pos, task.target_pos, energy_weight), 0, 0]
 
             # INVESTIGATE任务: 在未知点上来回走动
@@ -395,6 +406,8 @@ class Agent():
                 if np.array_equal(u_pos, task.target_pos):
                     actions[uid] = [np.random.randint(0, 5), 0, 0]
                     task.data["first_arrival"] = min(first_arrival, step)
+                elif self.game_map.obstacle_map[tuple(task.target_pos)] == Landscape.ASTEROID.value:
+                    task.clear()
                 else:
                     actions[uid] = [self.game_map.direction_to(u_pos, task.target_pos, energy_weight), 0, 0]
 
@@ -408,6 +421,8 @@ class Agent():
             # EXPLORE任务: 移动到指定点
             elif task.type == UnitTaskType.EXPLORE:
                 if np.array_equal(u_pos, task.target_pos):
+                    task.clear()
+                elif self.game_map.obstacle_map[tuple(task.target_pos)] == Landscape.ASTEROID.value:
                     task.clear()
                 else:
                     actions[uid] = [self.game_map.direction_to(u_pos, task.target_pos, energy_weight), 0, 0]
@@ -592,7 +607,8 @@ class Agent():
             self.explore_map = np.zeros((C.MAP_SIZE, C.MAP_SIZE), dtype=np.int16)
             return
         # 若上一个match中没有发现遗迹且视野范围较大, 关闭探索
-        elif (obs.curr_match - 1 > self.last_relic_observed // (C.MAX_STEPS_IN_MATCH + 1) + 1) and (self.sensor_range > 1):
+        elif (obs.curr_match - 1 > self.last_relic_observed // (C.MAX_STEPS_IN_MATCH + 1) + 1) and (self.sensor_range > 1) and \
+             (self.relic_center.shape[0] > 0):
             self.explore_map = np.zeros((C.MAP_SIZE, C.MAP_SIZE), dtype=np.int16)
             return
 
@@ -737,7 +753,7 @@ class Agent():
                 possibility * (real_points_invisible.shape[0] + 0.4 * unknown_points_invisible.shape[0]),
                 (real_points_invisible.shape[0] + 0.4 * unknown_points_invisible.shape[0]), possibility))
             for r_pos in real_points_invisible:
-                self.sap_orders.append(SapOrder(r_pos, ON_RELIC_WEIGHT * possibility, 1))
+                self.sap_orders.append(SapOrder(r_pos, ON_RELIC_WEIGHT * possibility, 2))
 
         # 累加处于同一位置上的SapOrder的优先级
         self.sap_orders.sort(key=lambda x: (x.target_pos[0], x.target_pos[1], x.priority), reverse=True)  # 位置相同时按优先级降序排列
@@ -873,7 +889,9 @@ class Agent():
     def energy_weight_fn(energy: int, move_cost: int) -> float:
         steps = energy // move_cost
 
-        if energy < 100 or steps < 20:
+        if energy < 25:
+            return 10
+        elif energy < 100 or steps < 20:
             return 0.3
         elif energy < 250:
             return 0.2

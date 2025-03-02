@@ -54,6 +54,14 @@ def in_map(pos: np.ndarray) -> Union[np.bool_, np.ndarray]:
     """判断输入的坐标是否在游戏地图内, pos形状如(..., 2)"""
     return np.all(np.logical_and(pos >= 0, pos < Constants.MAP_SIZE), axis=-1)
 
+def l1_dist(pos1: np.ndarray, pos2: np.ndarray) -> np.ndarray:
+    """计算两个坐标之间的L1距离, pos1和pos2其一形状如(..., 2)"""
+    return np.sum(np.abs(pos1 - pos2), axis=-1)
+
+def square_dist(pos1: np.ndarray, pos2: np.ndarray) -> np.ndarray:
+    """计算两个坐标之间的单轴最大距离, pos1和pos2其一形状如(..., 2)"""
+    return np.max(np.abs(pos1 - pos2), axis=-1)
+
 def flip_matrix(arr: np.ndarray) -> np.ndarray:
     """根据游戏的对称方式, 对输入的方阵进行翻转"""
     assert arr.shape[0] == arr.shape[1] and arr.ndim == 2, "arr must be a square matrix"
