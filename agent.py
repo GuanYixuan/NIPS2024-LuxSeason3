@@ -341,6 +341,7 @@ class Agent():
             UnitTaskType.IDLE: 1.0,
         }
         attack_idle_pts: Set[Tuple[int, int]] = set()
+        assert np.all(obs.opp_units_pos[obs.opp_units_mask] >= 0)
         for uid in range(C.MAX_UNITS):
             task = self.task_list[uid]
             u_selector = (self.team_id, uid)
@@ -348,7 +349,26 @@ class Agent():
             u_energy = obs.units_energy[u_selector]
             energy_weight = self.energy_weight_fn(u_energy, self.game_map.move_cost)
 
-            # 判断是否进行攻击
+            # 若相邻格有比自己能量低的敌方单位, 则直接走向敌方
+            action_decided = False
+            for i, delta in enumerate(C.DIRECTIONS):
+                enemy_pos = u_pos + delta
+                enemy_mask = np.all(obs.opp_units_pos == enemy_pos, axis=1) & obs.opp_units_mask
+                if not np.any(enemy_mask):
+                    continue
+                total_energy = np.sum(obs.opp_units_energy[enemy_mask])
+                if total_energy <= u_energy:
+                    actions[uid] = [i+1, 0, 0]
+                    self.logger.info(f"Unit {uid} -> crash {enemy_pos}")
+                else:
+                    actions[uid] = [(i^2)+1, 0, 0]
+                    self.logger.info(f"Unit {uid} -> avoid {enemy_pos}")
+                action_decided = True
+                break
+            if action_decided:
+                continue
+
+            # 判断是否进行Sap攻击
             can_sap_count = int(u_energy / self.sap_cost)
             if can_sap_count >= 1:
                 saps_in_range_mask = np.array([

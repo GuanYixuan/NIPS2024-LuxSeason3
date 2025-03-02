@@ -154,6 +154,7 @@ class Map:
         open_queue = [(heuristic(src), 0.0, start)]  # (f_score, g_score, current)
         heapq.heapify(open_queue)
 
+        DIR_ARRAY = C.DIRECTIONS.copy() if np.random.randint(0, 2) else C.DIRECTIONS[::-1].copy()  # 随机选择方向顺序
         while open_queue:
             # 获取f_score最小的节点
             f_score, g_score, current = heapq.heappop(open_queue)
@@ -180,8 +181,8 @@ class Map:
             # 标记当前节点为已访问
             closed_array[current_pos[0], current_pos[1]] = True
 
-            # 检查所有可能的移动方向
-            for i, d in enumerate(C.DIRECTIONS):
+            # 检查所有可能的移动方向（此处方向顺序随机）
+            for d in DIR_ARRAY:
                 neighbor = current_pos + d
                 next_pos = tuple(neighbor)
 
