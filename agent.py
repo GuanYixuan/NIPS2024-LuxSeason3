@@ -235,8 +235,8 @@ class Agent():
             dup_mask = np.any(np.abs(explore_points[next_idx:, :2] - explore_points[next_idx-1, :2]) <= self.sensor_range, axis=1)
             explore_points = np.concatenate((explore_points[:next_idx], explore_points[next_idx:][~dup_mask]))
             next_idx += 1
-        # if explore_points.shape[0] > 0 and explore_points[0, 2] > 0:
-        #     self.logger.info(f"Explore points: \n{explore_points}")
+
+        self.generate_watch_points()
 
         # -------------------- 任务分配 --------------------
 
@@ -883,6 +883,80 @@ class Agent():
         dir_scores /= np.sum(dir_scores)  # 归一化
         self.logger.info(f"Predict enemy {eid} direction: {dir_scores}")
         return dir_scores
+
+    watch_points: np.ndarray  # 前哨点列表, shape (N, 3)
+    def generate_watch_points(self) -> None:
+        """生成前哨点列表"""
+        self.watch_points = np.zeros((0, 3))
+
+        # 选取我方半区内得分点最多的relic_center作为中心
+        relic_center_mask = utils.l1_dist(self.base_pos, self.relic_center) <= C.MAP_SIZE
+        relic_center_score = np.sum(self.relic_nodes == 1, axis=(1, 2))
+        relic_center_score[~relic_center_mask] = 0
+        if relic_center_mask.shape[0] == 0:
+            return
+        base_point = self.relic_center[np.argmax(relic_center_score)]
+        self.logger.info(f"Base point: {base_point}")
+
+        # 创建备选点列表
+        x, y = np.meshgrid(np.arange(C.MAP_SIZE), np.arange(C.MAP_SIZE))
+        watch_points = np.column_stack((x.flatten(), y.flatten()))  # shape (N, 2)
+
+        # 计算角度score
+        def angle_score(angle: float) -> float:
+            if angle <= np.pi/6:
+                return 0.8
+            elif angle <= np.pi/3:
+                return 1.0
+            elif angle <= np.pi/2:
+                return 0.8
+            return 0.6
+        FORWARD_DIR = np.full((2,), 1/np.sqrt(2)) * (-1 if self.team_id else 1)
+        deltas = watch_points - base_point
+        delta_dirs = deltas / np.linalg.norm(deltas, axis=1, keepdims=True)
+        angles = np.arccos(np.clip(delta_dirs @ FORWARD_DIR, -1.0, 1.0))
+        watch_points = np.column_stack((watch_points, angles.flatten()))  # shape (N, 3)
+
+        # 根据距离筛选
+        dist_thresh = np.zeros(watch_points.shape[0])
+        dist_thresh[angles <= np.pi/2] = np.interp(
+            angles[angles <= np.pi/2], [0, np.pi/2],
+            [C.RELIC_SPREAD + self.sap_range + self.sensor_range, C.RELIC_SPREAD + self.sap_range]
+        )
+        dist_thresh[angles > np.pi/2] = np.interp(
+            angles[angles > np.pi/2], [np.pi/2, np.pi],
+            [C.RELIC_SPREAD + self.sap_range, C.RELIC_SPREAD]
+        )
+        watch_points = watch_points[utils.square_dist(deltas) <= dist_thresh]
+
+        # 根据能量筛选
+        watch_points = watch_points[self.game_map.full_energy_map[tuple(watch_points[:, :2].astype(int).T)] >= 3]
+
+        # 筛除与得分点相邻的点
+        real_points_myhalf = np.column_stack(np.where(self.relic_map == RelicInfo.REAL.value))
+        if real_points_myhalf.shape[0] > 0:
+            real_points_myhalf = real_points_myhalf[utils.l1_dist(real_points_myhalf, base_point) <= C.MAP_SIZE]
+            distances = np.max(np.abs(watch_points[:, :2].reshape(-1, 1, 2) - real_points_myhalf.reshape(1, -1, 2)), axis=2)
+            watch_points = watch_points[np.min(distances, axis=1) > 1]
+
+        # 计算能量score
+        ENERGY_WEIGHT = 1.0
+        energy_vals = self.game_map.full_energy_map[tuple(watch_points[:, :2].astype(int).T)] * ENERGY_WEIGHT
+        final_scores = np.array(list(map(angle_score, watch_points[:, 2]))) * energy_vals
+
+        # 排序并选择前哨点
+        watch_points[:, 2] = final_scores
+        watch_points = watch_points[np.argsort(-final_scores)]
+        next_undedup_idx = 1
+        while next_undedup_idx < watch_points.shape[0]:
+            dists = np.max(np.abs(
+                watch_points[next_undedup_idx:, :2].reshape(-1, 1, 2) - watch_points[:next_undedup_idx, :2].reshape(1, -1, 2)
+            ), axis=2)
+            valid_mask = np.min(dists, axis=1) > 1
+            watch_points = np.vstack((watch_points[:next_undedup_idx], watch_points[next_undedup_idx:][valid_mask]))
+            next_undedup_idx += 1
+
+        self.watch_points = watch_points
 
     @staticmethod
     def energy_weight_fn(energy: int, move_cost: int) -> float:
