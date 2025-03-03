@@ -54,11 +54,11 @@ def in_map(pos: np.ndarray) -> Union[np.bool_, np.ndarray]:
     """判断输入的坐标是否在游戏地图内, pos形状如(..., 2)"""
     return np.all(np.logical_and(pos >= 0, pos < Constants.MAP_SIZE), axis=-1)
 
-def l1_dist(pos1: np.ndarray, pos2: np.ndarray) -> np.ndarray:
+def l1_dist(pos1: np.ndarray, pos2: np.ndarray = np.zeros(2)) -> np.ndarray:
     """计算两个坐标之间的L1距离, pos1和pos2其一形状如(..., 2)"""
     return np.sum(np.abs(pos1 - pos2), axis=-1)
 
-def square_dist(pos1: np.ndarray, pos2: np.ndarray) -> np.ndarray:
+def square_dist(pos1: np.ndarray, pos2: np.ndarray = np.zeros(2)) -> np.ndarray:
     """计算两个坐标之间的单轴最大距离, pos1和pos2其一形状如(..., 2)"""
     return np.max(np.abs(pos1 - pos2), axis=-1)
 

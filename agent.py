@@ -192,12 +192,13 @@ class Agent():
         # -------------------- 任务分配预处理 --------------------
 
         # 根据到基地距离排序各得分点
+        PREFERRED_DISTANCE = 20 if (step % (C.MAX_STEPS_IN_MATCH + 1) <= 30) else 0
         MAX_POINT_DIST = C.MAP_SIZE + 3
         CAPT_RELIC_ENG_WEIGHT = 0.5
         real_points = np.vstack(np.where(
             (self.relic_map == RelicInfo.REAL.value) & (self.game_map.obstacle_map != Landscape.ASTEROID.value)
         )).T  # shape (N, 2)
-        dists = np.sum(np.abs(real_points - self.base_pos), axis=1)
+        dists = np.abs(np.sum(np.abs(real_points - self.base_pos), axis=1) - PREFERRED_DISTANCE)  # 距离合适的点
         argsort = np.argsort(dists - CAPT_RELIC_ENG_WEIGHT * self.game_map.energy_map[real_points[:, 0], real_points[:, 1]])
         dists = dists[argsort]
         real_points = real_points[argsort]  # 按到基地距离和能量排序

@@ -209,10 +209,9 @@ class Map:
                 if closed_array[next_pos]:
                     continue
 
-                move_cost = 1 + (self.nebula_cost if landscape == Landscape.NEBULA.value else 0) / self.move_cost
                 # 根据步数决定是否考虑能量图
-                energy_factor = self.energy_map[next_pos] * energy_weight if steps <= 8 else 0
-                tentative_g_score: float = g_score + max(0, move_cost - energy_factor)  # type: ignore
+                energy_factor = self.full_energy_map[next_pos] * energy_weight if steps <= 8 else 0
+                tentative_g_score: float = g_score + max(0, 1 - energy_factor)  # type: ignore
 
                 if tentative_g_score < g_scores[next_pos]:
                     g_scores[next_pos] = tentative_g_score
