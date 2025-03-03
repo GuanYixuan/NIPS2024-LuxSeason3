@@ -237,6 +237,10 @@ class Agent():
             next_idx += 1
 
         self.generate_watch_points()
+        if self.watch_points.shape[0] > 0:
+            front_dist = np.sum(self.watch_points[:, :2], axis=1)
+            if self.team_id == 1: front_dist *= -1
+            self.watch_points = self.watch_points[np.argsort(front_dist)]  # 按“前沿距离”排序
 
         # -------------------- 任务分配 --------------------
 
@@ -262,6 +266,8 @@ class Agent():
             set([(t.target_pos[0], t.target_pos[1]) for t in self.task_list if t.type == UnitTaskType.INVESTIGATE])
         allocated_explore_positions: Set[Tuple[int, int]] = \
             set([(t.target_pos[0], t.target_pos[1]) for t in self.task_list if t.type == UnitTaskType.EXPLORE])
+        allocated_defend_positions: List[Tuple[int, int]] = \
+            list([(t.target_pos[0], t.target_pos[1]) for t in self.task_list if t.type == UnitTaskType.DEFEND])
 
         # 1. 从各个较近的遗迹得分点出发, 寻找最近的空闲单位并分配为CAPTURE_RELIC任务
         actions = np.zeros((C.MAX_UNITS, 3), dtype=int)
@@ -273,14 +279,14 @@ class Agent():
             dists = np.sum(np.abs(obs.my_units_pos - real_pos), axis=1)
             free_mask = np.array([
                 t.type in (UnitTaskType.IDLE, UnitTaskType.INVESTIGATE,
-                           UnitTaskType.EXPLORE, UnitTaskType.ATTACK)
+                           UnitTaskType.EXPLORE, UnitTaskType.DEFEND)
                 for t in self.task_list])
             if not np.any(free_mask):
                 break  # 所有单位都有更高优先级任务
 
             dists[~free_mask] = 10000
             closest_uid = np.argmin(dists)
-            if dists[closest_uid] > 8 and self.task_list[closest_uid].type == UnitTaskType.ATTACK:
+            if dists[closest_uid] > 8 and self.task_list[closest_uid].type == UnitTaskType.DEFEND:
                 continue
             self.task_list[closest_uid] = UnitTask(UnitTaskType.CAPTURE_RELIC, real_pos, step)
             self.logger.info(f"Unit {closest_uid} -> relic {real_pos}")
@@ -326,7 +332,26 @@ class Agent():
                 self.logger.info(f"Unit {uid} -> explore {t_pos}")
                 break
 
-        # 4. 空闲单位走向较远的遗迹得分点, 不再去重
+        # 4. 空闲单位走向watch_points
+        for i in range(self.watch_points.shape[0]):
+            if len(allocated_defend_positions) >= 6:  # 限制DEFEND数量
+                break
+
+            pos = self.watch_points[i, :2].copy().astype(int)
+            if len(allocated_defend_positions) and np.any(utils.l1_dist(pos, np.array(allocated_defend_positions)) <= 1):
+                continue
+
+            dists = np.sum(np.abs(obs.my_units_pos - pos), axis=1)
+            free_mask = np.array([t.type == UnitTaskType.IDLE for t in self.task_list])
+            if not np.any(free_mask):
+                break  # 所有单位都有更高优先级任务
+
+            dists[~free_mask] = 10000
+            closest_uid = np.argmin(dists)
+            self.task_list[closest_uid] = UnitTask(UnitTaskType.DEFEND, pos, step)
+            self.logger.info(f"Unit {uid} -> watch {pos}")
+
+        # 5. 空闲单位走向较远的遗迹得分点, 不再去重
         real_points = np.column_stack(np.where(self.relic_map == RelicInfo.REAL.value))
         real_points_far = real_points[np.sum(np.abs(real_points - self.base_pos), axis=1) >= C.MAP_SIZE]
         if real_points_far.shape[0] > 0:
@@ -345,6 +370,7 @@ class Agent():
         MIN_SAP_PRIORITY: Dict[UnitTaskType, float] = {
             UnitTaskType.CAPTURE_RELIC: 4.5,
             UnitTaskType.INVESTIGATE: 3.0,
+            UnitTaskType.DEFEND: 2.0,
             UnitTaskType.ATTACK: 2.0,
             UnitTaskType.EXPLORE: 3.0,
             UnitTaskType.IDLE: 2.0,
@@ -451,6 +477,23 @@ class Agent():
                     actions[uid] = [self.game_map.direction_to(u_pos, target_pos, energy_weight), 0, 0]
                     attack_idle_pts.add((target_pos[0], target_pos[1]))
                     break
+
+            # DEFEND任务: 移动到指定点并防御
+            elif task.type == UnitTaskType.DEFEND:
+                if np.array_equal(u_pos, task.target_pos):
+                    # TODO: 随机移动
+                    pass
+                else:
+                    actions[uid] = [self.game_map.direction_to(u_pos, task.target_pos, energy_weight), 0, 0]
+
+                if np.all(utils.square_dist(task.target_pos, self.watch_points[:, :2]) > 1):
+                    self.logger.info(f"Unit {uid}'s watch point {task.target_pos} is no longer valid")
+                    task.clear()
+                    continue
+                if self.game_map.energy_map[tuple(task.target_pos)] <= 3:
+                    self.logger.info(f"Unit {uid}'s watch point {task.target_pos} is no longer valid")
+                    task.clear()
+                    continue
 
             # IDLE任务: 在周围10格寻找能量较高点并移动过去
             elif task.type == UnitTaskType.IDLE:
@@ -930,7 +973,7 @@ class Agent():
         watch_points = watch_points[utils.square_dist(deltas) <= dist_thresh]
 
         # 根据能量筛选
-        watch_points = watch_points[self.game_map.full_energy_map[tuple(watch_points[:, :2].astype(int).T)] >= 3]
+        watch_points = watch_points[self.game_map.full_energy_map[tuple(watch_points[:, :2].astype(int).T)] >= 4]
 
         # 筛除与得分点相邻的点
         real_points_myhalf = np.column_stack(np.where(self.relic_map == RelicInfo.REAL.value))
