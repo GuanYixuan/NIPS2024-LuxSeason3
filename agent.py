@@ -184,7 +184,6 @@ class Agent():
         # 估计遗迹得分点位置
         relic_updated = self.estimate_relic_positions()
         self.update_relic_map()
-        self.logger.info(f"obstacle_map: \n{self.game_map.obstacle_map.T}")
         # if np.any(self.explore_map > 5):
         #     self.logger.info("Explore map: \n" + str(self.explore_map.T))
         # if relic_updated:
@@ -346,8 +345,8 @@ class Agent():
             UnitTaskType.CAPTURE_RELIC: 4.5,
             UnitTaskType.INVESTIGATE: 3.0,
             UnitTaskType.ATTACK: 2.0,
-            UnitTaskType.EXPLORE: 2.0,
-            UnitTaskType.IDLE: 1.0,
+            UnitTaskType.EXPLORE: 3.0,
+            UnitTaskType.IDLE: 2.0,
         }
         attack_idle_pts: Set[Tuple[int, int]] = set()
         assert np.all(obs.opp_units_pos[obs.opp_units_mask] >= 0)
@@ -700,7 +699,7 @@ class Agent():
         dists = np.sum(np.abs(real_points - self.base_pos), axis=1)
         real_points_myhalf = real_points[dists <= C.MAP_SIZE]  # 我方半区得分点
         # 针对可见敌人生成SapOrder
-        ON_RELIC_WEIGHT = 3.0
+        ON_RELIC_WEIGHT = 3.5
         visible_enemy_on_relic: Set[Tuple[int, int]] = set()
         for eid, e_pos, e_energy in zip(range(C.MAX_UNITS), obs.opp_units_pos, obs.opp_units_energy):
             enemy_can_move = (e_energy >= self.game_map.move_cost)
@@ -725,19 +724,18 @@ class Agent():
                 continue  # 无能量且不在得分点上的敌人可放置以拖延时间
 
             # 3. 能量较低
-            need_hit_count = int(e_energy / self.sap_cost) + 1
-            if need_hit_count == 1:
+            need_dropoff = e_energy // (self.sap_cost * self.sap_dropoff) + 1
+            if need_dropoff <= 1:
                 priority += 2.0
-            elif need_hit_count == 2:
+            elif need_dropoff <= 2:
                 priority += 1.0
-            elif need_hit_count == 3:
-                priority += 0.5
 
             # 打提前量
             if not on_relic and enemy_can_move:
                 e_pos += C.ADJACENT_DELTAS[np.argmax(self.__pred_enemy_pos(eid))]
 
             # TODO: 融合多个相邻的SapOrder
+            need_hit_count = int(e_energy / self.sap_cost) + 1
             safe_hit_count = need_hit_count + 0 if (self.sap_dropoff == 1 or not enemy_can_move) else 1
             self.sap_orders.append(SapOrder(e_pos, priority, safe_hit_count))
 
@@ -807,7 +805,7 @@ class Agent():
                 hist_dir = pos_delta / np.linalg.norm(pos_delta)
                 dots = np.dot(C.ADJACENT_DELTAS, hist_dir)
                 dir_scores += dots * (dots > 0) * MOVE_CRIT_WEIGHT
-            self.logger.info(f"Predict enemy {eid} direction after move_crit: {dir_scores}")
+            self.logger.debug(f"Predict enemy {eid} direction after move_crit: {dir_scores}")
 
         # 得分点判据: 所有距离较近的我方半区得分点基本在同一半平面内
         MAX_DIST = 7
@@ -833,7 +831,7 @@ class Agent():
                 # 投影到各个方向
                 dots = np.dot(C.ADJACENT_DELTAS, best_dir)
                 dir_scores += dots * (dots > 0) * RELIC_CRIT_WEIGHT
-                self.logger.info(f"Predict enemy {eid} direction after relic_crit: {dir_scores}, best_dir: {best_dir}")
+                self.logger.debug(f"Predict enemy {eid} direction after relic_crit: {dir_scores}, best_dir: {best_dir}")
 
         # TODO: 单位在得分点上
 
@@ -879,7 +877,7 @@ class Agent():
 
         if max_eng_dir != -1:
             dir_scores[max_eng_dir] *= 2
-            self.logger.info(f"Predict enemy {eid} direction after energy modifications: {dir_scores}")
+            self.logger.debug(f"Predict enemy {eid} direction after energy modifications: {dir_scores}")
 
         dir_scores /= np.sum(dir_scores)  # 归一化
         self.logger.info(f"Predict enemy {eid} direction: {dir_scores}")
