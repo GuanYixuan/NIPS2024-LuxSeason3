@@ -247,6 +247,31 @@ class Agent():
             if explore_disabled and self.task_list[uid].type == UnitTaskType.EXPLORE:  # 探索已完成时, 中断当前的探索任务
                 self.task_list[uid].clear()
 
+        # 进行任务交换：相邻的两个单位, 能量较高者执行距离基地更远的任务
+        for u1 in range(C.MAX_UNITS):
+            u1_task = self.task_list[u1]
+            u1_pos = obs.my_units_pos[u1]
+            u1_energy = obs.my_units_energy[u1]
+            if u1_task.type == UnitTaskType.DEAD:
+                continue
+
+            for u2 in range(u1+1, C.MAX_UNITS):
+                u2_task = self.task_list[u2]
+                u2_pos = obs.my_units_pos[u2]
+                u2_energy = obs.my_units_energy[u2]
+                if u2_task.type == UnitTaskType.DEAD:
+                    continue
+                if utils.l1_dist(u1_pos, u2_pos) > 2 or abs(u1_energy - u2_energy) <= 30:
+                    continue
+                if (u1_task.type == UnitTaskType.CAPTURE_RELIC) != (u2_task.type == UnitTaskType.CAPTURE_RELIC):
+                    continue  # CAPTURE_RELIC的谨慎交换
+
+                delta_tgt_dist = utils.l1_dist(self.base_pos, u1_task.target_pos) - utils.l1_dist(self.base_pos, u2_task.target_pos)
+                if abs(delta_tgt_dist) >= 3 and np.sign(delta_tgt_dist) != np.sign(u1_energy - u2_energy):
+                    swp = u1_task, u2_task
+                    self.task_list[u2], self.task_list[u1] = swp
+                    self.logger.info(f"Task swap: {swp[0]} <-> {swp[1]} at {u1_pos}")
+
         allocated_unknown_positions: Set[Tuple[int, int]] = \
             set([(t.target_pos[0], t.target_pos[1]) for t in self.task_list if t.type == UnitTaskType.INVESTIGATE])
         allocated_explore_positions: Set[Tuple[int, int]] = \
@@ -266,17 +291,7 @@ class Agent():
                 self.task_list[uid] = UnitTask(UnitTaskType.ATTACK, tgt, step)
                 self.logger.info(f"Unit {uid} (eng {obs.my_units_energy[uid]}) -> attack {tgt}")
 
-        # 1. 交替分配DEFEND和CAPTURE_RELIC任务
-        while True:
-            allocated: bool = False
-            if step % 2 == 0:
-                allocated = (self.__try_allocate_defend(1) + self.__try_allocate_relic(1) > 0)
-            else:
-                allocated = (self.__try_allocate_relic(1) + self.__try_allocate_defend(1) > 0)
-            if not allocated:
-                break
-
-        # 2. 处理未知遗迹点, 寻找距离最近的空闲单位并分配为INVESTIGATE任务
+        # 1. 处理未知遗迹点, 寻找距离最近的空闲单位并分配为INVESTIGATE任务
         for unknown_pos in unknown_points:
             if len(allocated_unknown_positions) >= 4:  # 限制INVESTIGATE数量，避免难以推断
                 break
@@ -294,6 +309,16 @@ class Agent():
             allocated_unknown_positions.add(pos_tuple)
             self.task_list[closest_uid] = UnitTask(UnitTaskType.INVESTIGATE, unknown_pos, step)
             self.logger.info(f"Unit {closest_uid} -> unknown {unknown_pos}")
+
+        # 2. 交替分配DEFEND和CAPTURE_RELIC任务
+        while True:
+            allocated: bool = False
+            if step % 2 == 0:
+                allocated = (self.__try_allocate_defend(1) + self.__try_allocate_relic(1) > 0)
+            else:
+                allocated = (self.__try_allocate_relic(1) + self.__try_allocate_defend(1) > 0)
+            if not allocated:
+                break
 
         # 3. 未分配的单位执行EXPLORE任务
         MIN_PRIO = 250 if self.last_relic_observed >= 0 else 40
@@ -788,6 +813,7 @@ class Agent():
 
         curr_pos: np.ndarray = self.obs.opp_units_pos[eid]
         dir_scores = np.zeros(C.ADJACENT_DELTAS.shape[0])
+        dir_scores[0] = 0.5  # 默认倾向于不动
 
         # 移动判据：观察历史2~3步移动方向
         # TODO: 长期站着不动需要特判
