@@ -920,7 +920,7 @@ class Agent():
 
         # 选取我方半区内得分点最多的relic_center作为中心
         relic_center_mask = utils.l1_dist(self.base_pos, self.relic_center) <= C.MAP_SIZE
-        relic_center_score = np.sum(self.relic_nodes == 1, axis=(1, 2))
+        relic_center_score = np.sum(self.relic_nodes == 1, axis=(1, 2)) + utils.l1_dist(self.base_pos, self.relic_center)
         relic_center_score[~relic_center_mask] = 0
         if relic_center_mask.shape[0] == 0:
             return
@@ -981,7 +981,7 @@ class Agent():
             dists = np.max(np.abs(
                 watch_points[next_undedup_idx:, :2].reshape(-1, 1, 2) - watch_points[:next_undedup_idx, :2].reshape(1, -1, 2)
             ), axis=2)
-            valid_mask = np.min(dists, axis=1) > 1
+            valid_mask = np.min(dists, axis=1) > 2
             watch_points = np.vstack((watch_points[:next_undedup_idx], watch_points[next_undedup_idx:][valid_mask]))
             next_undedup_idx += 1
 
@@ -1118,7 +1118,7 @@ class Agent():
         """寻找从当前位置到target_pos的路径, 并返回下一步方向"""
         u_energy = self.obs.my_units_energy[uid]
         u_pos = self.obs.my_units_pos[uid]
-        if not randomness:
+        if not randomness or self.obs.match_steps <= 30:
             return self.game_map.direction_to(u_pos, target_pos,
                                               self.energy_weight_fn(u_energy, self.game_map.move_cost))
         else:
