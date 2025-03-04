@@ -224,10 +224,6 @@ class Agent():
             next_idx += 1
 
         self.generate_watch_points()
-        if self.watch_points.shape[0] > 0:
-            front_dist = np.sum(self.watch_points[:, :2], axis=1)
-            if self.team_id == 1: front_dist *= -1
-            self.watch_points = self.watch_points[np.argsort(front_dist)]  # 按“前沿距离”排序
 
         # -------------------- 任务分配 --------------------
 
@@ -261,10 +257,21 @@ class Agent():
                 u2_energy = obs.my_units_energy[u2]
                 if u2_task.type == UnitTaskType.DEAD:
                     continue
-                if utils.l1_dist(u1_pos, u2_pos) > 2 or abs(u1_energy - u2_energy) <= 30:
+
+                if abs(u1_energy - u2_energy) <= 40:
+                    continue  # 能量差距过小
+                if utils.l1_dist(u1_pos, u2_pos) > 2:
                     continue
-                if (u1_task.type == UnitTaskType.CAPTURE_RELIC) != (u2_task.type == UnitTaskType.CAPTURE_RELIC):
-                    continue  # CAPTURE_RELIC的谨慎交换
+
+                # 防止交换后无法到达指定地点
+                u1_on_spot = (u1_task.type == UnitTaskType.CAPTURE_RELIC and np.array_equal(u1_task.target_pos, u1_pos))
+                u2_on_spot = (u2_task.type == UnitTaskType.CAPTURE_RELIC and np.array_equal(u2_task.target_pos, u2_pos))
+                if u1_on_spot and (self.game_map.obstacle_map[tuple(u1_pos)] == Landscape.ASTEROID.value):
+                    continue
+                if u2_on_spot and (self.game_map.obstacle_map[tuple(u2_pos)] == Landscape.ASTEROID.value):
+                    continue
+                if (u1_on_spot or u2_on_spot) and (utils.l1_dist(u1_pos, u2_pos) > 1):
+                    continue  # 避免干扰生产
 
                 delta_tgt_dist = utils.l1_dist(self.base_pos, u1_task.target_pos) - utils.l1_dist(self.base_pos, u2_task.target_pos)
                 if abs(delta_tgt_dist) >= 3 and np.sign(delta_tgt_dist) != np.sign(u1_energy - u2_energy):
@@ -368,7 +375,6 @@ class Agent():
             u_selector = (self.team_id, uid)
             u_pos = obs.units_position[u_selector]
             u_energy = obs.units_energy[u_selector]
-            energy_weight = self.energy_weight_fn(u_energy, self.game_map.move_cost)
 
             # 若相邻格有比自己能量低的敌方单位, 则直接走向敌方
             action_decided = False
@@ -991,6 +997,13 @@ class Agent():
     def __try_allocate_defend(self, count: int) -> int:
         """尝试分配count个防御任务"""
         obs = self.obs
+
+        # 根据到基地距离排序前哨点
+        PREFERRED_DISTANCE = 20 if (obs.step % (C.MAX_STEPS_IN_MATCH + 1) <= 30) else 0
+        if self.watch_points.shape[0] > 0:
+            dists = np.abs(utils.l1_dist(self.watch_points[:, :2], self.base_pos) - PREFERRED_DISTANCE)
+            self.watch_points = self.watch_points[np.argsort(dists)]
+
         allocated_count = 0
         allocated_defend_positions: List[Tuple[int, int]] = \
             list([(t.target_pos[0], t.target_pos[1]) for t in self.task_list if t.type == UnitTaskType.DEFEND])
