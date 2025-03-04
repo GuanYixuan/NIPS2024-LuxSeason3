@@ -191,19 +191,6 @@ class Agent():
 
         # -------------------- 任务分配预处理 --------------------
 
-        # 根据到基地距离排序各得分点
-        PREFERRED_DISTANCE = 20 if (step % (C.MAX_STEPS_IN_MATCH + 1) <= 30) else 0
-        MAX_POINT_DIST = C.MAP_SIZE + 3
-        CAPT_RELIC_ENG_WEIGHT = 0.5
-        real_points = np.vstack(np.where(
-            (self.relic_map == RelicInfo.REAL.value) & (self.game_map.obstacle_map != Landscape.ASTEROID.value)
-        )).T  # shape (N, 2)
-        dists = np.abs(np.sum(np.abs(real_points - self.base_pos), axis=1) - PREFERRED_DISTANCE)  # 距离合适的点
-        argsort = np.argsort(dists - CAPT_RELIC_ENG_WEIGHT * self.game_map.energy_map[real_points[:, 0], real_points[:, 1]])
-        dists = dists[argsort]
-        real_points = real_points[argsort]  # 按到基地距离和能量排序
-        real_points_near = real_points[dists <= MAX_POINT_DIST]
-
         # 根据到基地距离排序各未知点
         INVEST_ENG_WEIGHT = 1
         unknown_points = np.vstack(np.where(
@@ -260,36 +247,34 @@ class Agent():
             if explore_disabled and self.task_list[uid].type == UnitTaskType.EXPLORE:  # 探索已完成时, 中断当前的探索任务
                 self.task_list[uid].clear()
 
-        allocated_real_positions: Set[Tuple[int, int]] = \
-            set([(t.target_pos[0], t.target_pos[1]) for t in self.task_list if t.type == UnitTaskType.CAPTURE_RELIC])
         allocated_unknown_positions: Set[Tuple[int, int]] = \
             set([(t.target_pos[0], t.target_pos[1]) for t in self.task_list if t.type == UnitTaskType.INVESTIGATE])
         allocated_explore_positions: Set[Tuple[int, int]] = \
             set([(t.target_pos[0], t.target_pos[1]) for t in self.task_list if t.type == UnitTaskType.EXPLORE])
-        allocated_defend_positions: List[Tuple[int, int]] = \
-            list([(t.target_pos[0], t.target_pos[1]) for t in self.task_list if t.type == UnitTaskType.DEFEND])
 
-        # 1. 从各个较近的遗迹得分点出发, 寻找最近的空闲单位并分配为CAPTURE_RELIC任务
         actions = np.zeros((C.MAX_UNITS, 3), dtype=int)
-        for real_pos in real_points_near:
-            pos_tuple = (real_pos[0], real_pos[1])
-            if pos_tuple in allocated_real_positions:
-                continue
 
-            dists = np.sum(np.abs(obs.my_units_pos - real_pos), axis=1)
-            free_mask = np.array([
-                t.type in (UnitTaskType.IDLE, UnitTaskType.INVESTIGATE,
-                           UnitTaskType.EXPLORE, UnitTaskType.DEFEND)
-                for t in self.task_list])
-            if not np.any(free_mask):
-                break  # 所有单位都有更高优先级任务
+        # 0 高能量单位进攻
+        real_points = np.column_stack(np.where(self.relic_map == RelicInfo.REAL.value))
+        real_points_far = real_points[np.sum(np.abs(real_points - self.base_pos), axis=1) >= C.MAP_SIZE]
+        if real_points_far.shape[0] > 0:
+            for uid in range(C.MAX_UNITS):
+                if self.task_list[uid].type == UnitTaskType.ATTACK or obs.my_units_energy[uid] < 300:
+                    continue
 
-            dists[~free_mask] = 10000
-            closest_uid = np.argmin(dists)
-            if dists[closest_uid] > 8 and self.task_list[closest_uid].type == UnitTaskType.DEFEND:
-                continue
-            self.task_list[closest_uid] = UnitTask(UnitTaskType.CAPTURE_RELIC, real_pos, step)
-            self.logger.info(f"Unit {closest_uid} -> relic {real_pos}")
+                tgt = real_points_far[np.random.choice(real_points_far.shape[0])]
+                self.task_list[uid] = UnitTask(UnitTaskType.ATTACK, tgt, step)
+                self.logger.info(f"Unit {uid} (eng {obs.my_units_energy[uid]}) -> attack {tgt}")
+
+        # 1. 交替分配DEFEND和CAPTURE_RELIC任务
+        while True:
+            allocated: bool = False
+            if step % 2 == 0:
+                allocated = (self.__try_allocate_defend(1) + self.__try_allocate_relic(1) > 0)
+            else:
+                allocated = (self.__try_allocate_relic(1) + self.__try_allocate_defend(1) > 0)
+            if not allocated:
+                break
 
         # 2. 处理未知遗迹点, 寻找距离最近的空闲单位并分配为INVESTIGATE任务
         for unknown_pos in unknown_points:
@@ -329,31 +314,10 @@ class Agent():
 
                 np.delete(explore_points, i, axis=0)
                 self.task_list[uid] = UnitTask(UnitTaskType.EXPLORE, t_pos, step)
-                self.logger.info(f"Unit {uid} -> explore {t_pos}")
+                self.logger.info(f"Unit {uid} (eng {obs.my_units_energy[uid]}) -> explore {t_pos}")
                 break
 
-        # 4. 空闲单位走向watch_points
-        for i in range(self.watch_points.shape[0]):
-            if len(allocated_defend_positions) >= 6:  # 限制DEFEND数量
-                break
-
-            pos = self.watch_points[i, :2].copy().astype(int)
-            if len(allocated_defend_positions) and np.any(utils.l1_dist(pos, np.array(allocated_defend_positions)) <= 1):
-                continue
-
-            dists = np.sum(np.abs(obs.my_units_pos - pos), axis=1)
-            free_mask = np.array([t.type == UnitTaskType.IDLE for t in self.task_list])
-            if not np.any(free_mask):
-                break  # 所有单位都有更高优先级任务
-
-            dists[~free_mask] = 10000
-            closest_uid = np.argmin(dists)
-            self.task_list[closest_uid] = UnitTask(UnitTaskType.DEFEND, pos, step)
-            self.logger.info(f"Unit {uid} -> watch {pos}")
-
-        # 5. 空闲单位走向较远的遗迹得分点, 不再去重
-        real_points = np.column_stack(np.where(self.relic_map == RelicInfo.REAL.value))
-        real_points_far = real_points[np.sum(np.abs(real_points - self.base_pos), axis=1) >= C.MAP_SIZE]
+        # 4. 空闲单位走向较远的遗迹得分点, 不再去重
         if real_points_far.shape[0] > 0:
             for uid in range(C.MAX_UNITS):
                 if self.task_list[uid].type != UnitTaskType.IDLE:
@@ -361,10 +325,7 @@ class Agent():
 
                 tgt = real_points_far[np.random.choice(real_points_far.shape[0])]
                 self.task_list[uid] = UnitTask(UnitTaskType.ATTACK, tgt, step)
-                self.logger.info(f"Unit {uid} -> relic far {tgt}")
-
-        # 输出统计信息
-        # self.logger.info("Task list: \n%s" % "\n".join(["%d: %s" % (i, str(t)) for i, t in enumerate(self.task_list)]))
+                self.logger.info(f"Unit {uid} (eng {obs.my_units_energy[uid]}) -> attack {tgt}")
 
         # ------------------ 各单位执行各自的任务 --------------------
         MIN_SAP_PRIORITY: Dict[UnitTaskType, float] = {
@@ -964,16 +925,16 @@ class Agent():
         dist_thresh = np.zeros(watch_points.shape[0])
         dist_thresh[angles <= np.pi/2] = np.interp(
             angles[angles <= np.pi/2], [0, np.pi/2],
-            [C.RELIC_SPREAD + self.sap_range + self.sensor_range, C.RELIC_SPREAD + self.sap_range]
+            [C.RELIC_SPREAD + self.sap_range + self.sensor_range * 2, self.sap_range]
         )
         dist_thresh[angles > np.pi/2] = np.interp(
             angles[angles > np.pi/2], [np.pi/2, np.pi],
-            [C.RELIC_SPREAD + self.sap_range, C.RELIC_SPREAD]
+            [self.sap_range, C.RELIC_SPREAD]
         )
         watch_points = watch_points[utils.square_dist(deltas) <= dist_thresh]
 
         # 根据能量筛选
-        watch_points = watch_points[self.game_map.full_energy_map[tuple(watch_points[:, :2].astype(int).T)] >= 4]
+        watch_points = watch_points[self.game_map.full_energy_map[tuple(watch_points[:, :2].astype(int).T)] >= 5]
 
         # 筛除与得分点相邻的点
         real_points_myhalf = np.column_stack(np.where(self.relic_map == RelicInfo.REAL.value))
@@ -1000,6 +961,84 @@ class Agent():
             next_undedup_idx += 1
 
         self.watch_points = watch_points
+
+    def __try_allocate_defend(self, count: int) -> int:
+        """尝试分配count个防御任务"""
+        obs = self.obs
+        allocated_count = 0
+        allocated_defend_positions: List[Tuple[int, int]] = \
+            list([(t.target_pos[0], t.target_pos[1]) for t in self.task_list if t.type == UnitTaskType.DEFEND])
+        for i in range(self.watch_points.shape[0]):
+            if len(allocated_defend_positions) >= 6:  # 限制DEFEND数量
+                break
+
+            pos = self.watch_points[i, :2].copy().astype(int)
+            if len(allocated_defend_positions) and np.any(utils.square_dist(pos, np.array(allocated_defend_positions)) <= 1):
+                continue
+
+            dists = np.sum(np.abs(obs.my_units_pos - pos), axis=1)
+            free_mask = np.array([t.type == UnitTaskType.IDLE for t in self.task_list])
+            if not np.any(free_mask):
+                break  # 所有单位都有更高优先级任务
+
+            dists[~free_mask] = 10000
+            closest_uid = np.argmin(dists)
+            self.task_list[closest_uid] = UnitTask(UnitTaskType.DEFEND, pos, obs.step)
+            self.logger.info(f"Unit {closest_uid} (eng {obs.my_units_energy[closest_uid]}) -> watch {pos}")
+
+            allocated_count += 1
+            allocated_defend_positions.append((pos[0], pos[1]))
+            if allocated_count >= count:
+                return allocated_count
+
+        return allocated_count
+
+    def __try_allocate_relic(self, count: int) -> int:
+        """尝试分配count个占领得分点任务"""
+        obs = self.obs
+
+        # 根据到基地距离排序各得分点
+        PREFERRED_DISTANCE = 20 if (obs.step % (C.MAX_STEPS_IN_MATCH + 1) <= 30) else 0
+        MAX_POINT_DIST = C.MAP_SIZE + 3
+        CAPT_RELIC_ENG_WEIGHT = 0.5
+        real_points = np.vstack(np.where(
+            (self.relic_map == RelicInfo.REAL.value) & (self.game_map.obstacle_map != Landscape.ASTEROID.value)
+        )).T  # shape (N, 2)
+        dists = np.abs(np.sum(np.abs(real_points - self.base_pos), axis=1) - PREFERRED_DISTANCE)  # 距离合适的点
+        argsort = np.argsort(dists - CAPT_RELIC_ENG_WEIGHT * self.game_map.energy_map[real_points[:, 0], real_points[:, 1]])
+        dists = dists[argsort]
+        real_points = real_points[argsort]  # 按到基地距离和能量排序
+        real_points_near = real_points[dists <= MAX_POINT_DIST]
+
+        allocated_count = 0
+        allocated_real_positions: Set[Tuple[int, int]] = \
+            set([(t.target_pos[0], t.target_pos[1]) for t in self.task_list if t.type == UnitTaskType.CAPTURE_RELIC])
+        for real_pos in real_points_near:
+            pos_tuple = (real_pos[0], real_pos[1])
+            if pos_tuple in allocated_real_positions:
+                continue
+
+            dists = np.sum(np.abs(obs.my_units_pos - real_pos), axis=1)
+            free_mask = np.array([
+                t.type in (UnitTaskType.IDLE, UnitTaskType.INVESTIGATE,
+                           UnitTaskType.EXPLORE, UnitTaskType.ATTACK)
+                for t in self.task_list])
+            if not np.any(free_mask):
+                break  # 所有单位都有更高优先级任务
+
+            dists[~free_mask] = 10000
+            closest_uid = np.argmin(dists)
+            if dists[closest_uid] > 8 and self.task_list[closest_uid].type == UnitTaskType.DEFEND:
+                continue
+            self.task_list[closest_uid] = UnitTask(UnitTaskType.CAPTURE_RELIC, real_pos, obs.step)
+            self.logger.info(f"Unit {closest_uid} (eng {obs.my_units_energy[closest_uid]}) -> relic {real_pos}")
+
+            allocated_count += 1
+            allocated_real_positions.add(pos_tuple)
+            if allocated_count >= count:
+                return allocated_count
+
+        return allocated_count
 
     @staticmethod
     def energy_weight_fn(energy: int, move_cost: int) -> float:
