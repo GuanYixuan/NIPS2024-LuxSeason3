@@ -410,7 +410,7 @@ class Agent():
                 if not np.array_equal(u_pos, task.target_pos) and \
                    self.game_map.obstacle_map[tuple(task.target_pos)] == Landscape.ASTEROID.value:
                     task.clear()
-                actions[uid] = [self.game_map.direction_to(u_pos, task.target_pos, energy_weight), 0, 0]
+                actions[uid] = [self.__find_path_for(uid, task.target_pos, False), 0, 0]
 
             # INVESTIGATE任务: 在未知点上来回走动
             elif task.type == UnitTaskType.INVESTIGATE:
@@ -421,7 +421,7 @@ class Agent():
                 elif self.game_map.obstacle_map[tuple(task.target_pos)] == Landscape.ASTEROID.value:
                     task.clear()
                 else:
-                    actions[uid] = [self.game_map.direction_to(u_pos, task.target_pos, energy_weight), 0, 0]
+                    actions[uid] = [self.__find_path_for(uid, task.target_pos), 0, 0]
 
                 if self.relic_map[tuple(task.target_pos)] != RelicInfo.UNKNOWN.value:
                     self.logger.info(f"Unit {uid} complete INVESTIGATE task")
@@ -437,7 +437,7 @@ class Agent():
                 elif self.game_map.obstacle_map[tuple(task.target_pos)] == Landscape.ASTEROID.value:
                     task.clear()
                 else:
-                    actions[uid] = [self.game_map.direction_to(u_pos, task.target_pos, energy_weight), 0, 0]
+                    actions[uid] = [self.__find_path_for(uid, task.target_pos), 0, 0]
 
             # ATTACK任务: 在遗迹附近寻找能量较高点
             elif task.type == UnitTaskType.ATTACK:
@@ -445,7 +445,7 @@ class Agent():
                 MAX_ATTACK_DIST = self.sap_range
 
                 if np.max(np.abs(u_pos - task.target_pos)) >= MAX_ATTACK_DIST + 2 or u_energy >= 350:
-                    actions[uid] = [self.game_map.direction_to(u_pos, task.target_pos, energy_weight), 0, 0]
+                    actions[uid] = [self.__find_path_for(uid, task.target_pos), 0, 0]
                     continue
 
                 high_eng_mask = np.ones_like(self.game_map.full_energy_map, dtype=bool)  # 暂时不设mask
@@ -460,7 +460,7 @@ class Agent():
                     target_pos = high_eng_pts[i, :2]
                     if (target_pos[0], target_pos[1]) in attack_idle_pts:
                         continue
-                    actions[uid] = [self.game_map.direction_to(u_pos, target_pos, energy_weight), 0, 0]
+                    actions[uid] = [self.__find_path_for(uid, task.target_pos), 0, 0]
                     attack_idle_pts.add((target_pos[0], target_pos[1]))
                     break
 
@@ -470,7 +470,7 @@ class Agent():
                     # TODO: 随机移动
                     pass
                 else:
-                    actions[uid] = [self.game_map.direction_to(u_pos, task.target_pos, energy_weight), 0, 0]
+                    actions[uid] = [self.__find_path_for(uid, task.target_pos), 0, 0]
 
                 if np.all(utils.square_dist(task.target_pos, self.watch_points[:, :2]) > 1):
                     self.logger.info(f"Unit {uid}'s watch point {task.target_pos} is no longer valid")
@@ -493,7 +493,7 @@ class Agent():
 
                 if high_eng_pts.shape[0]:
                     target_pos = high_eng_pts[np.argmax(high_eng_pts[:, 2])][:2]
-                    actions[uid] = [self.game_map.direction_to(u_pos, target_pos, energy_weight), 0, 0]
+                    actions[uid] = [self.__find_path_for(uid, task.target_pos), 0, 0]
 
         # 保存历史观测结果
         self.history.append(obs)
@@ -1080,3 +1080,22 @@ class Agent():
             return 0.10
         else:
             return 0.05
+
+    @staticmethod
+    def __heuristic_left(pos: np.ndarray, target_pos: np.ndarray) -> float:
+        return -pos[0] * 0.2
+    @staticmethod
+    def __heuristic_right(pos: np.ndarray, target_pos: np.ndarray) -> float:
+        return pos[0] * 0.2
+    def __find_path_for(self, uid: int, target_pos: np.ndarray, randomness: bool = True) -> int:
+        """寻找从当前位置到target_pos的路径, 并返回下一步方向"""
+        u_energy = self.obs.my_units_energy[uid]
+        u_pos = self.obs.my_units_pos[uid]
+        if not randomness:
+            return self.game_map.direction_to(u_pos, target_pos,
+                                              self.energy_weight_fn(u_energy, self.game_map.move_cost))
+        else:
+            heuristic_fn = self.__heuristic_left if uid % 2 == 0 else self.__heuristic_right
+            return self.game_map.direction_to(u_pos, target_pos,
+                                              self.energy_weight_fn(u_energy, self.game_map.move_cost),
+                                              heuristic_fn)

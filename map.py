@@ -2,12 +2,13 @@ import heapq
 import numpy as np
 from enum import Enum
 
+import utils
 from logger import Logger
 from utils import Constants as C
 from utils import _NDArray, Shape
 from observation import Observation
 
-from typing import Tuple
+from typing import Tuple, Callable
 
 class Landscape(Enum):
     """地形类型"""
@@ -113,7 +114,13 @@ class Map:
 
         return not obstacle_unmoved, not energy_unmoved
 
-    def direction_to(self, src: np.ndarray, dst: np.ndarray, energy_weight: float) -> int:
+    @staticmethod
+    def __l1_heuristic(src: np.ndarray, dst: np.ndarray) -> float:
+        """L1距离启发函数"""
+        return utils.l1_dist(src, dst).sum() * 0.3
+
+    def direction_to(self, src: np.ndarray, dst: np.ndarray, energy_weight: float,
+                     _heuristic: Callable[[np.ndarray, np.ndarray], float] = __l1_heuristic) -> int:
         """利用A*算法计算从src到dst的下一步方向"""
         src = np.array(src)
         dst = np.array(dst)
@@ -146,9 +153,7 @@ class Map:
         if np.array_equal(src, dst):
             return 0
 
-        # 启发函数
-        def heuristic(pos: np.ndarray) -> float:
-            return np.sum(np.abs(pos - dst)) * 0.3
+        heuristic: Callable[[np.ndarray], float] = lambda x: _heuristic(x, dst)
 
         # 初始化数组
         closed_array = np.zeros((C.MAP_SIZE, C.MAP_SIZE), dtype=bool)
@@ -164,7 +169,6 @@ class Map:
         open_queue = [(heuristic(src), 0.0, 0, start)]  # (f_score, g_score, steps, current)
         heapq.heapify(open_queue)
 
-        DIR_ARRAY = C.DIRECTIONS.copy() if np.random.randint(0, 2) else C.DIRECTIONS[::-1].copy()  # 随机选择方向顺序
         while open_queue:
             # 获取f_score最小的节点
             f_score, g_score, steps, current = heapq.heappop(open_queue)
@@ -182,9 +186,9 @@ class Map:
                     if np.array_equal(parent_pos, src):
                         # 返回对应的方向索引
                         diff = current_pos - src
-                        for i, d in enumerate(C.DIRECTIONS):
+                        for i, d in enumerate(C.FULL_DIRECTIONS):
                             if np.array_equal(diff, d):
-                                return i + 1  # 加1转换为游戏中的方向值
+                                return i
                     current_pos = parent_pos
                 return 0
 
@@ -192,7 +196,7 @@ class Map:
             closed_array[current_pos[0], current_pos[1]] = True
 
             # 检查所有可能的移动方向（此处方向顺序随机）
-            for d in DIR_ARRAY:
+            for d in C.FULL_DIRECTIONS:
                 neighbor = current_pos + d
                 next_pos = tuple(neighbor)
 
