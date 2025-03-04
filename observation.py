@@ -161,7 +161,7 @@ class Observation:
 
     @property
     def is_match_start(self) -> bool:
-        """是否是比赛开始"""
+        """是否是某小局比赛开始"""
         return self.steps % (Constants.MAX_STEPS_IN_MATCH + 1) == 1
 
     @property

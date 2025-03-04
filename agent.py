@@ -350,23 +350,16 @@ class Agent():
                 break
 
         # 4. 空闲单位走向较远的遗迹得分点, 不再去重
-        if real_points_far.shape[0] > 0:
-            for uid in range(C.MAX_UNITS):
-                if self.task_list[uid].type != UnitTaskType.IDLE:
-                    continue
-
-                tgt = real_points_far[np.random.choice(real_points_far.shape[0])]
-                self.task_list[uid] = UnitTask(UnitTaskType.ATTACK, tgt, step)
-                self.logger.info(f"Unit {uid} (eng {obs.my_units_energy[uid]}) -> attack {tgt}")
+        self.__try_allocate_attack(99)
 
         # ------------------ 各单位执行各自的任务 --------------------
         MIN_SAP_PRIORITY: Dict[UnitTaskType, float] = {
-            UnitTaskType.CAPTURE_RELIC: 4.5,
-            UnitTaskType.INVESTIGATE: 3.0,
-            UnitTaskType.DEFEND: 2.0,
-            UnitTaskType.ATTACK: 2.0,
-            UnitTaskType.EXPLORE: 3.0,
-            UnitTaskType.IDLE: 2.0,
+            UnitTaskType.CAPTURE_RELIC: 5.5,
+            UnitTaskType.INVESTIGATE: 5.0,
+            UnitTaskType.DEFEND: 3.0,
+            UnitTaskType.ATTACK: 3.0,
+            UnitTaskType.EXPLORE: 4.0,
+            UnitTaskType.IDLE: 3.0,
         }
         attack_idle_pts: Set[Tuple[int, int]] = set()
         assert np.all(obs.opp_units_pos[obs.opp_units_mask] >= 0)
@@ -742,7 +735,7 @@ class Agent():
             if not obs.units_mask[self.team_id, eid] or e_energy < 0:
                 continue
 
-            priority = 0.0
+            priority = 1.0
 
             # 按条件累加优先级
             # 1. 在我方半区得分点附近
@@ -1076,6 +1069,27 @@ class Agent():
             allocated_real_positions.add(pos_tuple)
             if allocated_count >= count:
                 return allocated_count
+
+        return allocated_count
+
+    def __try_allocate_attack(self, count: int) -> int:
+        """尝试分配count个攻击任务"""
+        obs = self.obs
+        real_points = np.column_stack(np.where(self.relic_map == RelicInfo.REAL.value))
+        real_points_far = real_points[np.sum(np.abs(real_points - self.base_pos), axis=1) >= C.MAP_SIZE]
+
+        allocated_count = 0
+        if real_points_far.shape[0] > 0:
+            for uid in range(C.MAX_UNITS):
+                if self.task_list[uid].type != UnitTaskType.IDLE:
+                    continue
+
+                tgt = real_points_far[np.random.choice(real_points_far.shape[0])]
+                self.task_list[uid] = UnitTask(UnitTaskType.ATTACK, tgt, obs.step)
+                self.logger.info(f"Unit {uid} (eng {obs.my_units_energy[uid]}) -> attack {tgt}")
+                allocated_count += 1
+                if allocated_count >= count:
+                    return allocated_count
 
         return allocated_count
 
