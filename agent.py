@@ -290,14 +290,13 @@ class Agent():
         actions = np.zeros((C.MAX_UNITS, 3), dtype=int)
 
         # 0 高能量单位进攻
-        real_points = np.column_stack(np.where(self.relic_map == RelicInfo.REAL.value))
-        real_points_far = real_points[np.sum(np.abs(real_points - self.base_pos), axis=1) >= C.MAP_SIZE]
-        if real_points_far.shape[0] > 0:
+        relic_center_opp = self.relic_center[utils.l1_dist(self.relic_center, self.base_pos) > C.MAP_SIZE]
+        if relic_center_opp.shape[0] > 0:
             for uid in range(C.MAX_UNITS):
                 if self.task_list[uid].type == UnitTaskType.ATTACK or obs.my_units_energy[uid] < 300:
                     continue
 
-                tgt = real_points_far[np.random.choice(real_points_far.shape[0])]
+                tgt = relic_center_opp[np.random.choice(relic_center_opp.shape[0])]
                 self.task_list[uid] = UnitTask(UnitTaskType.ATTACK, tgt, step, 2)  # 优先级较高
                 self.logger.info(f"Unit {uid} (eng {obs.my_units_energy[uid]}) -> attack {tgt}")
 
@@ -360,17 +359,20 @@ class Agent():
             UnitTaskType.CAPTURE_RELIC: 5.5,
             UnitTaskType.INVESTIGATE: 5.0,
             UnitTaskType.DEFEND: 3.0,
-            UnitTaskType.ATTACK: 5.0,
+            UnitTaskType.ATTACK: 15.0,
             UnitTaskType.EXPLORE: 4.0,
             UnitTaskType.IDLE: 3.0,
         }
-        attack_idle_pts: Set[Tuple[int, int]] = set()
         assert np.all(obs.opp_units_pos[obs.opp_units_mask] >= 0)
         for uid in range(C.MAX_UNITS):
             task = self.task_list[uid]
             u_selector = (self.team_id, uid)
             u_pos = obs.units_position[u_selector]
             u_energy = obs.units_energy[u_selector]
+            if task.type == UnitTaskType.DEAD:
+                continue
+
+            self.logger.info(f"Unit {uid} (eng {u_energy}) -> {task.type} {task.target_pos} {task.data}")
 
             # 若相邻格有比自己能量低的敌方单位, 则直接走向敌方
             action_decided = False
@@ -441,30 +443,9 @@ class Agent():
                 else:
                     actions[uid] = [self.__find_path_for(uid, task.target_pos), 0, 0]
 
-            # ATTACK任务: 在遗迹附近寻找能量较高点
+            # ATTACK任务
             elif task.type == UnitTaskType.ATTACK:
-                MIN_ATTACK_DIST = 1
-                MAX_ATTACK_DIST = self.sap_range
-
-                if np.max(np.abs(u_pos - task.target_pos)) >= MAX_ATTACK_DIST + 2 or u_energy >= 350:
-                    actions[uid] = [self.__find_path_for(uid, task.target_pos), 0, 0]
-                    continue
-
-                high_eng_mask = np.ones_like(self.game_map.full_energy_map, dtype=bool)  # 暂时不设mask
-                high_eng_pts = np.column_stack(np.where(high_eng_mask) + (self.game_map.full_energy_map[high_eng_mask].flatten(),))
-                dists = np.max(np.abs(high_eng_pts[:, :2] - task.target_pos), axis=1)
-                mask = (MIN_ATTACK_DIST <= dists) & (dists <= MAX_ATTACK_DIST)
-                high_eng_pts = high_eng_pts[mask]
-                dists = dists[mask]
-                high_eng_pts = high_eng_pts[np.argsort(high_eng_pts[:, 2])]
-
-                for i in range(high_eng_pts.shape[0]):
-                    target_pos = high_eng_pts[i, :2]
-                    if (target_pos[0], target_pos[1]) in attack_idle_pts:
-                        continue
-                    actions[uid] = [self.__find_path_for(uid, task.target_pos), 0, 0]
-                    attack_idle_pts.add((target_pos[0], target_pos[1]))
-                    break
+                actions[uid] = self.__conduct_attack(uid)
 
             # DEFEND任务: 移动到指定点并防御
             elif task.type == UnitTaskType.DEFEND:
@@ -707,7 +688,7 @@ class Agent():
         return True
 
     def update_relic_map(self) -> None:
-        """更新遗迹得分点地图"""
+        """更新遗迹得分点地图, 同时计算遗迹视野mask"""
         self.relic_map = np.zeros((C.MAP_SIZE, C.MAP_SIZE), dtype=np.int8)
         for idx in range(self.relic_center.shape[0] - 1, -1, -1):
             r_pos = self.relic_center[idx]
@@ -1077,16 +1058,15 @@ class Agent():
     def __try_allocate_attack(self, count: int) -> int:
         """尝试分配count个攻击任务"""
         obs = self.obs
-        real_points = np.column_stack(np.where(self.relic_map == RelicInfo.REAL.value))
-        real_points_far = real_points[np.sum(np.abs(real_points - self.base_pos), axis=1) >= C.MAP_SIZE]
+        relic_center_opp = self.relic_center[utils.l1_dist(self.relic_center, self.base_pos) > C.MAP_SIZE]
 
         allocated_count = 0
-        if real_points_far.shape[0] > 0:
+        if relic_center_opp.shape[0] > 0:
             for uid in range(C.MAX_UNITS):
                 if self.task_list[uid].type != UnitTaskType.IDLE:
                     continue
 
-                tgt = real_points_far[np.random.choice(real_points_far.shape[0])]
+                tgt = relic_center_opp[np.random.choice(relic_center_opp.shape[0])]
                 self.task_list[uid] = UnitTask(UnitTaskType.ATTACK, tgt, obs.step)
                 self.logger.info(f"Unit {uid} (eng {obs.my_units_energy[uid]}) -> attack {tgt}")
                 allocated_count += 1
@@ -1094,6 +1074,111 @@ class Agent():
                     return allocated_count
 
         return allocated_count
+
+    def __conduct_attack(self, uid: int) -> List[int]:
+        """执行攻击任务"""
+        TARGET_KEY = "specfic_target"
+
+        obs = self.obs
+        gmap = self.game_map
+        allocated_pos = [t.data[TARGET_KEY] for t in self.task_list if t.type == UnitTaskType.ATTACK and TARGET_KEY in t.data]
+
+        task = self.task_list[uid]
+        u_pos = obs.my_units_pos[uid]
+        u_energy = obs.my_units_energy[uid]
+        rough_target = task.target_pos.copy()
+
+        # 计算需要避开的视野mask
+        avoid_mask = np.zeros((C.MAP_SIZE, C.MAP_SIZE), dtype=bool)
+        real_points = np.column_stack(np.where(self.relic_map == RelicInfo.REAL.value))
+        real_points = real_points[utils.square_dist(real_points, rough_target) <= 4]
+        if real_points.shape[0] > 0:
+            avoid_points = utils.get_coord_list()
+            avoid_points = avoid_points[np.min(
+                np.max(np.abs(avoid_points.reshape(-1, 1, 2) - real_points.reshape(1, -1, 2)), axis=-1), axis=-1
+            ) <= self.sensor_range]
+            avoid_mask[tuple(avoid_points.T)] = True
+
+        # 若未设定具体目标或目标不符合标准, 重新选择目标
+        target_reset = False
+        if task.data.get(TARGET_KEY, None) is None:
+            target_reset = True
+        else:
+            target_pos: np.ndarray = task.data[TARGET_KEY]
+            t_tuple = (target_pos[0], target_pos[1])
+            if gmap.obstacle_map[t_tuple] == Landscape.ASTEROID.value: target_reset = True
+            elif gmap.energy_map_mask[t_tuple] and gmap.full_energy_map[t_tuple] < 3: target_reset = True
+        if target_reset and real_points.shape[0] == 0:
+            task.clear()
+            return [0, 0, 0]
+        elif target_reset and real_points.shape[0] > 0:
+            # 选出所有“与real_points中所有点距离大于等于sensor_range, 但至少与一点距离等于sensor_range”的点
+            valid_points = utils.get_coord_list()
+            dists = np.max(np.abs(valid_points.reshape(-1, 1, 2) - real_points.reshape(1, -1, 2)), axis=-1)
+            valid_points = valid_points[np.min(dists, axis=-1) == self.sensor_range]
+            # 与现有点对比去除临近点
+            if len(allocated_pos) > 0:
+                dists = np.max(np.abs(valid_points.reshape(-1, 1, 2) - np.array(allocated_pos).reshape(1, -1, 2)), axis=-1)
+                valid_points = valid_points[np.min(dists, axis=-1) >= 2]
+            # 根据能量进行筛选
+            MIN_FULL_ENG = 2
+            eng_val = gmap.full_energy_map[tuple(valid_points.T)]
+            mask = eng_val >= MIN_FULL_ENG
+            valid_points, eng_val = valid_points[mask], eng_val[mask]
+            # 根据到敌方基地-rough_target线段的距离进行筛选
+            MIN_PATH_DIST = 2.5
+            dist1 = utils.dist_to_segment(utils.flip_coord(self.base_pos), rough_target, valid_points)
+            mask = dist1 >= MIN_PATH_DIST
+            valid_points, dist1, eng_val = valid_points[mask], dist1[mask], eng_val[mask]
+            # 根据到rough_target与其对称点连线的距离进行筛选
+            dist2 = utils.dist_to_segment(utils.flip_coord(rough_target), rough_target, valid_points)
+            mask = dist2 >= MIN_PATH_DIST
+            valid_points, dist1, dist2, eng_val = valid_points[mask], dist1[mask], dist2[mask], eng_val[mask]
+            # 根据分数排序
+            dist_to_upos = utils.l1_dist(valid_points, u_pos)
+            scores = eng_val * np.minimum(dist1, dist2) / np.clip(dist_to_upos, 3, 100)
+            if len(allocated_pos):
+                dists = np.max(np.abs(valid_points.reshape(-1, 1, 2) - np.array(allocated_pos).reshape(1, -1, 2)), axis=-1)
+                scores *= np.where(np.min(dists, axis=-1) <= 2, 0.5, 1.0)
+            self.logger.info(f"valid_points: {np.column_stack((valid_points, scores, dist1, dist2, eng_val))}")
+            valid_points = valid_points[np.argsort(-scores)]
+            # 选择最优点作为目标
+            if valid_points.shape[0] > 0:
+                task.data[TARGET_KEY] = valid_points[0]
+                self.logger.info(f"Unit {uid} (eng {obs.my_units_energy[uid]}) selected target {task.data[TARGET_KEY]}")
+            else:
+                self.logger.info(f"Unit {uid} (eng {obs.my_units_energy[uid]}) has no valid target")
+                task.clear()
+                return [0, 0, 0]
+
+        specfic_target: np.ndarray = task.data[TARGET_KEY]
+
+        # 若未曾到达目标点附近, 继续行进
+        last_arrival = task.data.get("last_arrival", -1)
+        if utils.square_dist(u_pos, specfic_target) <= 1:
+            last_arrival = obs.step
+            task.data["last_arrival"] = last_arrival
+        if last_arrival < 0:
+            return [
+                self.__find_path_for(uid, specfic_target, randomness=False, extra_cost=avoid_mask.astype(float) * 10), 0, 0
+            ]
+
+        # 到达过目标点附近, 判断自身是否在得分点附近的敌方视野内
+        enemy_in_sight = obs.opp_units_pos[obs.opp_units_mask]
+        enemy_in_sight = enemy_in_sight[utils.square_dist(enemy_in_sight, u_pos) <= self.sensor_range]
+        enemy_in_sight_relic = enemy_in_sight[utils.square_dist(enemy_in_sight, rough_target) <= 3]
+
+        # 若是, 尝试后退离开视野
+        if enemy_in_sight_relic.shape[0] > 0:
+            clostest_enemy = enemy_in_sight_relic[np.argmin(utils.square_dist(enemy_in_sight_relic, u_pos))]
+            move_dir = u_pos - clostest_enemy
+            normalized_dir = C.DIRECTIONS[np.argmax(C.DIRECTIONS @ move_dir)]
+            return [self.__find_path_for(uid, np.clip(u_pos + 2 * normalized_dir, 0, C.MAP_SIZE - 1)), 0, 0]
+
+        # 若否, 考虑攻击目标点、前进一格或保持不动吸收能量
+        else:
+            return [self.__find_path_for(uid, rough_target, randomness=False), 0, 0]
+            # TODO: 攻击目标点或保持不动
 
     @staticmethod
     def energy_weight_fn(energy: int, move_cost: int) -> float:
@@ -1116,15 +1201,15 @@ class Agent():
     @staticmethod
     def __heuristic_right(pos: np.ndarray, target_pos: np.ndarray) -> float:
         return pos[0] * 0.2
-    def __find_path_for(self, uid: int, target_pos: np.ndarray, randomness: bool = True) -> int:
+    def __find_path_for(self, uid: int, target_pos: np.ndarray, randomness: bool = True, extra_cost: Optional[np.ndarray] = None) -> int:
         """寻找从当前位置到target_pos的路径, 并返回下一步方向"""
         u_energy = self.obs.my_units_energy[uid]
         u_pos = self.obs.my_units_pos[uid]
         if not randomness or self.obs.match_steps <= 30:
             return self.game_map.direction_to(u_pos, target_pos,
-                                              self.energy_weight_fn(u_energy, self.game_map.move_cost))
+                                              self.energy_weight_fn(u_energy, self.game_map.move_cost), extra_cost=extra_cost)
         else:
             heuristic_fn = self.__heuristic_left if uid % 2 == 0 else self.__heuristic_right
             return self.game_map.direction_to(u_pos, target_pos,
                                               self.energy_weight_fn(u_energy, self.game_map.move_cost),
-                                              heuristic_fn)
+                                              heuristic_fn, extra_cost=extra_cost)
