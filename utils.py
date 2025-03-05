@@ -4,15 +4,6 @@ from numpy import dtype
 from typing import Literal, Union, Tuple
 from typing import TYPE_CHECKING, TypeVar
 
-if TYPE_CHECKING:
-    Size = TypeVar("Size", bound=str, covariant=True)
-    ScalarType = TypeVar("ScalarType", bound=np.generic, covariant=True)
-    Shape = Literal
-    _NDArray = np.ndarray[Size, dtype[ScalarType]]  # type: ignore
-else:
-    Shape = Literal
-    _NDArray = Tuple
-
 class Constants:
     """游戏常量"""
 
@@ -54,6 +45,10 @@ class Constants:
 
     POSSIBLE_SAP_DROPOFF = np.array([0.25, 0.5, 1])
 
+def get_coord_list() -> np.ndarray:
+    """获取游戏地图的所有坐标"""
+    return np.stack(np.meshgrid(np.arange(Constants.MAP_SIZE), np.arange(Constants.MAP_SIZE)), axis=-1).reshape(-1, 2)
+
 def get_dir_index(delta: np.ndarray) -> int:
     """根据相邻坐标delta返回游戏方向值"""
     return np.where(np.all(Constants.DIRECTIONS == delta, axis=1))[0][0] + 1
@@ -69,6 +64,23 @@ def l1_dist(pos1: np.ndarray, pos2: np.ndarray = np.zeros(2)) -> np.ndarray:
 def square_dist(pos1: np.ndarray, pos2: np.ndarray = np.zeros(2)) -> np.ndarray:
     """计算两个坐标之间的单轴最大距离, pos1和pos2其一形状如(..., 2)"""
     return np.max(np.abs(pos1 - pos2), axis=-1)
+
+def dist_to_segment(seg_p1: np.ndarray, seg_p2: np.ndarray, pos: np.ndarray) -> np.ndarray:
+    """计算点pos到线段seg_p1-seg_p2的距离, seg_p1和seg_p2形状为(2,), pos形状为(..., 2), 结果形状为(...,)"""
+    line_vec = seg_p2 - seg_p1
+    point_vec = pos - seg_p1
+    line_len_sq = np.sum(line_vec * line_vec)
+
+    if line_len_sq == 0:
+        return np.sqrt(np.sum(point_vec * point_vec, axis=-1))
+
+    # 投影比例 t
+    t = np.sum(point_vec * line_vec, axis=-1) / line_len_sq
+    t = np.clip(t, 0, 1)
+
+    # 投影点坐标
+    projection = seg_p1 + np.expand_dims(t, axis=-1) * line_vec
+    return np.sqrt(np.sum((pos - projection) ** 2, axis=-1))
 
 def flip_matrix(arr: np.ndarray) -> np.ndarray:
     """根据游戏的对称方式, 对输入的方阵进行翻转"""
