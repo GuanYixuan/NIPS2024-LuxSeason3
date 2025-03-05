@@ -5,10 +5,9 @@ from enum import Enum
 import utils
 from logger import Logger
 from utils import Constants as C
-from utils import _NDArray, Shape
 from observation import Observation
 
-from typing import Tuple, Callable
+from typing import Tuple, Callable, Optional
 
 class Landscape(Enum):
     """地形类型"""
@@ -20,12 +19,14 @@ class Landscape(Enum):
 class Map:
     """地图类, 处理寻路、障碍移动估计等"""
 
-    obstacle_map: _NDArray[Shape["(MAP_SIZE, MAP_SIZE)"], np.int8]
-    """障碍地图, 数值依照Landscape枚举设置"""
-    energy_map: _NDArray[Shape["(MAP_SIZE, MAP_SIZE)"], np.int8]
-    """能量地图, 未知值设为0"""
-    full_energy_map: _NDArray[Shape["(MAP_SIZE, MAP_SIZE)"], np.int8]
-    """完整能量地图, 考虑了障碍的影响"""
+    obstacle_map: np.ndarray
+    """障碍地图, 数值依照Landscape枚举设置, 形状为(MAP_SIZE, MAP_SIZE)"""
+    energy_map: np.ndarray
+    """能量地图, 未知值设为0, 形状为(MAP_SIZE, MAP_SIZE)"""
+    energy_map_mask: np.ndarray
+    """能量地图掩码, 未知值设为False, 形状与energy_map相同"""
+    full_energy_map: np.ndarray
+    """完整能量地图, 考虑了障碍的影响, 形状与energy_map相同"""
 
     move_cost: int = 5
     """移动代价, 默认取最大可能值"""
@@ -48,6 +49,7 @@ class Map:
         """初始化地图"""
         self.obstacle_map = obs.map_tile_type.copy()
         self.energy_map = obs.map_energy.copy()
+        self.energy_map_mask = np.zeros_like(self.energy_map, dtype=bool)
 
         assert C.MAP_SIZE == obs.map_tile_type.shape[0] == obs.map_tile_type.shape[1]
 
@@ -100,12 +102,15 @@ class Map:
         energy_unmoved = np.array_equal(self.energy_map[both_visible_mask], obs.map_energy[both_visible_mask])
         if energy_unmoved:
             self.energy_map[obs.sym_sensor_mask] = obs.map_energy[obs.sym_sensor_mask]
+            self.energy_map_mask[obs.sym_sensor_mask] = True
         else:
             if not self.energy_drift_estimated and obs.step > 2:
                 self.energy_drift_speed = 1 / (obs.step - 2)
                 self.energy_drift_estimated = True
                 self.logger.info("Energy drift estimated, speed: %.3f" % self.energy_drift_speed)
             self.energy_map = obs.map_energy.copy()  # 目前直接更新能量地图
+            self.energy_map_mask = np.zeros_like(self.energy_map, dtype=bool)
+            self.energy_map_mask[obs.sym_sensor_mask] = True
 
         # 更新完整能量地图
         self.full_energy_map = self.energy_map.copy()
@@ -120,7 +125,8 @@ class Map:
         return utils.l1_dist(src, dst).sum() * 0.3
 
     def direction_to(self, src: np.ndarray, dst: np.ndarray, energy_weight: float,
-                     _heuristic: Callable[[np.ndarray, np.ndarray], float] = __l1_heuristic) -> int:
+                     _heuristic: Callable[[np.ndarray, np.ndarray], float] = __l1_heuristic,
+                     extra_cost: Optional[np.ndarray] = None) -> int:
         """利用A*算法计算从src到dst的下一步方向"""
         src = np.array(src)
         dst = np.array(dst)
@@ -216,6 +222,8 @@ class Map:
                 # 根据步数决定是否考虑能量图
                 energy_factor = self.full_energy_map[next_pos] * energy_weight if steps <= 8 else 0
                 tentative_g_score: float = g_score + max(0, 1 - energy_factor)  # type: ignore
+                if extra_cost is not None:
+                    tentative_g_score += extra_cost[next_pos]  # type: ignore
 
                 if tentative_g_score < g_scores[next_pos]:
                     g_scores[next_pos] = tentative_g_score
