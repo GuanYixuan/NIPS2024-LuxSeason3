@@ -1020,8 +1020,9 @@ class Agent():
         real_points = np.vstack(np.where(
             (self.relic_map == RelicInfo.REAL.value) & (self.game_map.obstacle_map != Landscape.ASTEROID.value)
         )).T  # shape (N, 2)
-        dists = np.abs(np.sum(np.abs(real_points - self.base_pos), axis=1) - PREFERRED_DISTANCE)  # 距离合适的点
-        argsort = np.argsort(dists - CAPT_RELIC_ENG_WEIGHT * self.game_map.energy_map[real_points[:, 0], real_points[:, 1]])
+        dists = np.sum(np.abs(real_points - self.base_pos), axis=1) # 距离合适的点
+        argsort = np.argsort(np.abs(dists- PREFERRED_DISTANCE) - \
+                             CAPT_RELIC_ENG_WEIGHT * self.game_map.energy_map[real_points[:, 0], real_points[:, 1]])
         dists = dists[argsort]
         real_points = real_points[argsort]  # 按到基地距离和能量排序
         real_points_near = real_points[dists <= MAX_POINT_DIST]
