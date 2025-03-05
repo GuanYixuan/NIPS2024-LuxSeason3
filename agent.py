@@ -37,12 +37,14 @@ class UnitTask:
     type: UnitTaskType
     target_pos: np.ndarray
     start_step: int
+    priority: float
     data: Dict[str, Any]
 
-    def __init__(self, type: UnitTaskType, target_pos: np.ndarray, start_step: int) -> None:
+    def __init__(self, type: UnitTaskType, target_pos: np.ndarray, start_step: int, priority: float = 0.0) -> None:
         self.type = type
         self.target_pos = target_pos
         self.start_step = start_step
+        self.priority = priority
         self.data = {}
 
     def __repr__(self) -> str:
@@ -55,6 +57,7 @@ class UnitTask:
         self.type = UnitTaskType.IDLE
         self.target_pos = np.zeros(2, dtype=np.int8)
         self.start_step = 0
+        self.priority = 0.0
         self.data.clear()
 
 class SapOrder:
@@ -295,7 +298,7 @@ class Agent():
                     continue
 
                 tgt = real_points_far[np.random.choice(real_points_far.shape[0])]
-                self.task_list[uid] = UnitTask(UnitTaskType.ATTACK, tgt, step)
+                self.task_list[uid] = UnitTask(UnitTaskType.ATTACK, tgt, step, 2)  # 优先级较高
                 self.logger.info(f"Unit {uid} (eng {obs.my_units_energy[uid]}) -> attack {tgt}")
 
         # 1. 处理未知遗迹点, 寻找距离最近的空闲单位并分配为INVESTIGATE任务
@@ -357,7 +360,7 @@ class Agent():
             UnitTaskType.CAPTURE_RELIC: 5.5,
             UnitTaskType.INVESTIGATE: 5.0,
             UnitTaskType.DEFEND: 3.0,
-            UnitTaskType.ATTACK: 3.0,
+            UnitTaskType.ATTACK: 5.0,
             UnitTaskType.EXPLORE: 4.0,
             UnitTaskType.IDLE: 3.0,
         }
@@ -475,7 +478,7 @@ class Agent():
                     self.logger.info(f"Unit {uid}'s watch point {task.target_pos} is no longer valid")
                     task.clear()
                     continue
-                if self.game_map.energy_map[tuple(task.target_pos)] <= 3:
+                if self.game_map.full_energy_map[tuple(task.target_pos)] <= 3:
                     self.logger.info(f"Unit {uid}'s watch point {task.target_pos} is no longer valid")
                     task.clear()
                     continue
@@ -925,6 +928,7 @@ class Agent():
         if relic_center_mask.shape[0] == 0:
             return
         base_point = self.relic_center[np.argmax(relic_center_score)]
+        base_point_dist = utils.l1_dist(base_point, self.base_pos)
         self.logger.info(f"Base point: {base_point}")
 
         # 创建备选点列表
@@ -947,19 +951,18 @@ class Agent():
         watch_points = np.column_stack((watch_points, angles.flatten()))  # shape (N, 3)
 
         # 根据距离筛选
+        extra_width = float(np.interp(base_point_dist, [10, C.MAP_SIZE], [0, 3]))
         dist_thresh = np.zeros(watch_points.shape[0])
-        dist_thresh[angles <= np.pi/2] = np.interp(
-            angles[angles <= np.pi/2], [0, np.pi/2],
-            [C.RELIC_SPREAD + self.sap_range + self.sensor_range * 2, self.sap_range]
-        )
-        dist_thresh[angles > np.pi/2] = np.interp(
-            angles[angles > np.pi/2], [np.pi/2, np.pi],
-            [self.sap_range, C.RELIC_SPREAD]
+        dist_thresh = np.interp(angles, [0, np.pi/2, np.pi],
+            [C.RELIC_SPREAD + self.sap_range + self.sensor_range * 2, self.sap_range + extra_width, C.RELIC_SPREAD]
         )
         watch_points = watch_points[utils.square_dist(deltas) <= dist_thresh]
 
         # 根据能量筛选
-        watch_points = watch_points[self.game_map.full_energy_map[tuple(watch_points[:, :2].astype(int).T)] >= 5]
+        engval = self.game_map.full_energy_map[tuple(watch_points[:, :2].astype(int).T)]
+        watch_points = watch_points[
+            (engval == 0) | (engval >= 5)
+        ]
 
         # 筛除与得分点相邻的点
         real_points_myhalf = np.column_stack(np.where(self.relic_map == RelicInfo.REAL.value))
@@ -992,7 +995,7 @@ class Agent():
         obs = self.obs
 
         # 根据到基地距离排序前哨点
-        PREFERRED_DISTANCE = 20 if (obs.step % (C.MAX_STEPS_IN_MATCH + 1) <= 30) else 0
+        PREFERRED_DISTANCE = C.MAP_SIZE if (obs.match_steps <= 30) else 12
         if self.watch_points.shape[0] > 0:
             dists = np.abs(utils.l1_dist(self.watch_points[:, :2], self.base_pos) - PREFERRED_DISTANCE)
             self.watch_points = self.watch_points[np.argsort(dists)]
@@ -1052,15 +1055,14 @@ class Agent():
 
             dists = np.sum(np.abs(obs.my_units_pos - real_pos), axis=1)
             free_mask = np.array([
-                t.type in (UnitTaskType.IDLE, UnitTaskType.INVESTIGATE,
-                           UnitTaskType.EXPLORE, UnitTaskType.ATTACK)
-                for t in self.task_list])
+                t.type in (UnitTaskType.IDLE, UnitTaskType.INVESTIGATE, UnitTaskType.EXPLORE, UnitTaskType.ATTACK) and \
+                t.priority < 1 for t in self.task_list])
             if not np.any(free_mask):
                 break  # 所有单位都有更高优先级任务
 
             dists[~free_mask] = 10000
             closest_uid = np.argmin(dists)
-            if dists[closest_uid] > 8 and self.task_list[closest_uid].type == UnitTaskType.DEFEND:
+            if dists[closest_uid] > 8 and self.task_list[closest_uid].type in (UnitTaskType.ATTACK, UnitTaskType.EXPLORE):
                 continue
             self.task_list[closest_uid] = UnitTask(UnitTaskType.CAPTURE_RELIC, real_pos, obs.step)
             self.logger.info(f"Unit {closest_uid} (eng {obs.my_units_energy[closest_uid]}) -> relic {real_pos}")
