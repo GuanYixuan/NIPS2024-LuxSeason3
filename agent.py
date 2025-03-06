@@ -130,6 +130,8 @@ class Agent():
     """最后一次发现新遗迹中心点的时间步"""
     explore_map: np.ndarray
     """探索地图, 其中值表示对应格有多少回合未出现在视野内"""
+    unclustering_cost: np.ndarray
+    """为避免聚集给寻路添加的额外开销"""
 
     history: List[Observation]
     """历史观测结果, 保存至**上一个回合**"""
@@ -191,6 +193,19 @@ class Agent():
         #     self.logger.info("Explore map: \n" + str(self.explore_map.T))
         # if relic_updated:
         #     self.logger.info(f"Map updated: \n{self.relic_map.T}")
+
+        # 计算unclustering_cost
+        self.unclustering_cost = np.zeros((C.MAP_SIZE, C.MAP_SIZE), dtype=np.int8)
+        for uid in range(C.MAX_UNITS):
+            if not obs.my_units_mask[uid]:
+                continue
+            if obs.my_units_energy[uid] < 0:
+                continue
+
+            u_pos = obs.my_units_pos[uid]
+            bounds = np.array([u_pos - 1, u_pos + 1])
+            bounds = np.clip(bounds, 0, C.MAP_SIZE-1)
+            self.unclustering_cost[bounds[0, 0]:bounds[1, 0]+1, bounds[0, 1]:bounds[1, 1]+1] += 3
 
         # -------------------- 任务分配预处理 --------------------
 
@@ -298,7 +313,6 @@ class Agent():
 
                 tgt = relic_center_opp[np.random.choice(relic_center_opp.shape[0])]
                 self.task_list[uid] = UnitTask(UnitTaskType.ATTACK, tgt, step, 2)  # 优先级较高
-                self.logger.info(f"Unit {uid} (eng {obs.my_units_energy[uid]}) -> attack {tgt}")
 
         # 1. 处理未知遗迹点, 寻找距离最近的空闲单位并分配为INVESTIGATE任务
         for unknown_pos in unknown_points:
@@ -317,7 +331,6 @@ class Agent():
             closest_uid = np.argmin(dists)
             allocated_unknown_positions.add(pos_tuple)
             self.task_list[closest_uid] = UnitTask(UnitTaskType.INVESTIGATE, unknown_pos, step)
-            self.logger.info(f"Unit {closest_uid} -> unknown {unknown_pos}")
 
         # 2. 交替分配DEFEND和CAPTURE_RELIC任务
         while True:
@@ -348,7 +361,6 @@ class Agent():
 
                 np.delete(explore_points, i, axis=0)
                 self.task_list[uid] = UnitTask(UnitTaskType.EXPLORE, t_pos, step)
-                self.logger.info(f"Unit {uid} (eng {obs.my_units_energy[uid]}) -> explore {t_pos}")
                 break
 
         # 4. 空闲单位走向较远的遗迹得分点, 不再去重
@@ -1000,7 +1012,6 @@ class Agent():
             dists[~free_mask] = 10000
             closest_uid = np.argmin(dists)
             self.task_list[closest_uid] = UnitTask(UnitTaskType.DEFEND, pos, obs.step)
-            self.logger.info(f"Unit {closest_uid} (eng {obs.my_units_energy[closest_uid]}) -> watch {pos}")
 
             allocated_count += 1
             allocated_defend_positions.append((pos[0], pos[1]))
@@ -1047,7 +1058,6 @@ class Agent():
             if dists[closest_uid] > 8 and self.task_list[closest_uid].type in (UnitTaskType.ATTACK, UnitTaskType.EXPLORE):
                 continue
             self.task_list[closest_uid] = UnitTask(UnitTaskType.CAPTURE_RELIC, real_pos, obs.step)
-            self.logger.info(f"Unit {closest_uid} (eng {obs.my_units_energy[closest_uid]}) -> relic {real_pos}")
 
             allocated_count += 1
             allocated_real_positions.add(pos_tuple)
@@ -1069,7 +1079,6 @@ class Agent():
 
                 tgt = relic_center_opp[np.random.choice(relic_center_opp.shape[0])]
                 self.task_list[uid] = UnitTask(UnitTaskType.ATTACK, tgt, obs.step)
-                self.logger.info(f"Unit {uid} (eng {obs.my_units_energy[uid]}) -> attack {tgt}")
                 allocated_count += 1
                 if allocated_count >= count:
                     return allocated_count
@@ -1122,19 +1131,17 @@ class Agent():
                 dists = np.max(np.abs(valid_points.reshape(-1, 1, 2) - np.array(allocated_pos).reshape(1, -1, 2)), axis=-1)
                 valid_points = valid_points[np.min(dists, axis=-1) >= 2]
             # 根据能量进行筛选
-            MIN_FULL_ENG = 2
+            MIN_FULL_ENG = 1
             eng_val = gmap.full_energy_map[tuple(valid_points.T)]
             mask = eng_val >= MIN_FULL_ENG
             valid_points, eng_val = valid_points[mask], eng_val[mask]
             # 根据到敌方基地-rough_target线段的距离进行筛选
-            MIN_PATH_DIST = 2.5
+            MIN_PATH_DIST = 1.0
             dist1 = utils.dist_to_segment(utils.flip_coord(self.base_pos), rough_target, valid_points)
             mask = dist1 >= MIN_PATH_DIST
             valid_points, dist1, eng_val = valid_points[mask], dist1[mask], eng_val[mask]
-            # 根据到rough_target与其对称点连线的距离进行筛选
+            # 计算到rough_target与其对称点连线的距离
             dist2 = utils.dist_to_segment(utils.flip_coord(rough_target), rough_target, valid_points)
-            mask = dist2 >= MIN_PATH_DIST
-            valid_points, dist1, dist2, eng_val = valid_points[mask], dist1[mask], dist2[mask], eng_val[mask]
             # 根据分数排序
             dist_to_upos = utils.l1_dist(valid_points, u_pos)
             scores = eng_val * np.minimum(dist1, dist2) / np.clip(dist_to_upos, 3, 100)
@@ -1206,6 +1213,10 @@ class Agent():
         """寻找从当前位置到target_pos的路径, 并返回下一步方向"""
         u_energy = self.obs.my_units_energy[uid]
         u_pos = self.obs.my_units_pos[uid]
+        if extra_cost is None:
+            extra_cost = self.unclustering_cost
+        else:
+            extra_cost = extra_cost + self.unclustering_cost
         if not randomness or self.obs.match_steps <= 30:
             return self.game_map.direction_to(u_pos, target_pos,
                                               self.energy_weight_fn(u_energy, self.game_map.move_cost), extra_cost=extra_cost)
