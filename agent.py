@@ -84,10 +84,10 @@ class SapOrder:
         return self.priority < other.priority
 
     def __repr__(self) -> str:
-        return f"SapOrder(pri={self.priority}, {self.target_pos}, need {self.need_hit_count} hits)"
+        return "(pri=%.2f, %s, %d hits)" % (self.priority, self.target_pos, self.need_hit_count)
 
     def __str__(self) -> str:
-        return f"({self.priority}, {self.target_pos}, need {self.need_hit_count} hits)"
+        return f"({self.priority}, {self.target_pos}, {self.need_hit_count} hits)"
 
     def satisfied(self) -> bool:
         return self.fulfilled_count >= self.need_hit_count
@@ -210,7 +210,7 @@ class Agent():
             u_pos = obs.my_units_pos[uid]
             bounds = np.array([u_pos - 1, u_pos + 1])
             bounds = np.clip(bounds, 0, C.MAP_SIZE-1)
-            self.unclustering_cost[bounds[0, 0]:bounds[1, 0]+1, bounds[0, 1]:bounds[1, 1]+1] += 3
+            self.unclustering_cost[bounds[0, 0]:bounds[1, 0]+1, bounds[0, 1]:bounds[1, 1]+1] += 1
 
         # 更新opp_menory
         self.opp_menory[:, 3] += 1
@@ -398,7 +398,7 @@ class Agent():
             if task.type == UnitTaskType.DEAD:
                 continue
 
-            self.logger.info(f"Unit {uid} (eng {u_energy}) -> {task.type} {task.target_pos} {task.data}")
+            self.logger.info(f"Unit {uid} (eng {u_energy}) -> {task.type.name} {task.target_pos} {task.data}")
 
             # 若相邻格有比自己能量低的敌方单位, 则直接走向敌方
             action_decided = False
@@ -817,16 +817,19 @@ class Agent():
             for r_pos in real_points_invisible:
                 # 生成普通SapOrder
                 normal_prio = ON_RELIC_WEIGHT * possibility * \
-                    float(np.interp(self.hit_intensity_map[r_pos[0], r_pos[1]], [0.5, 2.5], [1.0, 0.0]))
+                    float(np.interp(self.hit_intensity_map[r_pos[0], r_pos[1]], [0.5, 2.0], [1.0, 0.0]))
                 self.sap_orders.append(SapOrder(r_pos, normal_prio, 2))
 
             for r_pos in real_points:
                 # 生成攻击SapOrder
-                attack_prio = possibility if not obs.sensor_mask[r_pos[0], r_pos[1]] else 1.5
+                attack_prio = possibility if not obs.sensor_mask[r_pos[0], r_pos[1]] else 0.0
                 attack_prio += float(np.interp(self.hit_intensity_map[r_pos[0], r_pos[1]], [0.3, 2.0], [2.0, 0]))  # 低密度区奖励
                 close_enemy = self.opp_menory[
                     (self.opp_menory[:, 3] <= MAX_LATENCY) & (utils.square_dist(r_pos, self.opp_menory[:, :2]) <= 1)
                 ]
+                if obs.sensor_mask[r_pos[0], r_pos[1]] and \
+                   not np.any(utils.square_dist(r_pos, obs.opp_units_pos[obs.opp_units_mask]) == 0):
+                    continue
                 for e_data in close_enemy:
                     e_pos: np.ndarray = e_data[:2]
                     e_energy: int = e_data[2]
@@ -844,6 +847,9 @@ class Agent():
 
                     over_hit = e_used - ((e_energy // self.sap_cost) + 1)
                     delta_prio *= float(np.interp(over_hit, [0, 2], [1.0, 0.25]))
+
+                    if e_data[3] <= 1:  # 目前可见
+                        delta_prio += 2.0
 
                     attack_prio += delta_prio
 
@@ -1255,7 +1261,7 @@ class Agent():
         enemy_in_sight_relic = enemy_in_sight[utils.square_dist(enemy_in_sight, rough_target) <= 3]
 
         # 若是, 尝试后退离开视野
-        if enemy_in_sight_relic.shape[0] > 0:
+        if enemy_in_sight_relic.shape[0] > 0 and u_energy < 250:
             clostest_enemy = enemy_in_sight_relic[np.argmin(utils.square_dist(enemy_in_sight_relic, u_pos))]
             move_dir = u_pos - clostest_enemy
             normalized_dir = C.DIRECTIONS[np.argmax(C.DIRECTIONS @ move_dir)]
@@ -1264,18 +1270,25 @@ class Agent():
         # 若否, 考虑攻击目标点、前进一格或保持不动吸收能量
         elif u_energy >= self.sap_cost:
             MIN_PRIO = float(np.interp(u_energy,
-                                       [self.sap_cost + 10, self.sap_cost * 2, self.sap_cost * 4],
-                                       [10.0, 7.5, 4.0]))
+                                       [self.sap_cost + 10, self.sap_cost * 2, self.sap_cost * 4, self.sap_cost * 6],
+                                       [10.0, 7.5, 3.0, 2.0]))
+            self.logger.info(f"Unit {uid} (eng {obs.my_units_energy[uid]}) finding sap with priority {MIN_PRIO}")
             for order in self.attack_sap_orders:
                 if order.priority < MIN_PRIO:
                     break
+                if order.satisfied():
+                    continue
                 delta_pos = order.target_pos - u_pos
                 if utils.square_dist(delta_pos) <= self.sap_range:
+                    order.fulfilled_count += 1
                     return [5, delta_pos[0], delta_pos[1]]
-
-            # 保持不动
+        # 能量较低, 保持不动
+        else:
             return [0, 0, 0]
-        return [self.__find_path_for(uid, rough_target, randomness=False), 0, 0]
+        # 否则前进一格
+        if self.sap_dropoff < 1 or np.random.rand() < 0.2:
+            return [self.__find_path_for(uid, rough_target, randomness=False), 0, 0]
+        return [0, 0, 0]
 
     @staticmethod
     def energy_weight_fn(energy: int, move_cost: int) -> float:
