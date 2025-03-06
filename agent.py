@@ -114,6 +114,7 @@ class Agent():
 
     base_pos: np.ndarray
     """基地位置"""
+    frontline_indicator: float
 
     game_map: Map
     """游戏地图"""
@@ -174,6 +175,7 @@ class Agent():
 
         # -------------------- 初始化项 --------------------
         if obs.is_match_start:
+            self.frontline_indicator = C.MAP_SIZE
             self.opp_menory = np.zeros((C.MAX_UNITS, 5), dtype=np.int16)
             self.hit_intensity_map = np.zeros((C.MAP_SIZE, C.MAP_SIZE), dtype=np.float32)
 
@@ -198,6 +200,23 @@ class Agent():
         #     self.logger.info("Explore map: \n" + str(self.explore_map.T))
         # if relic_updated:
         #     self.logger.info(f"Map updated: \n{self.relic_map.T}")
+
+        # 计算frontline
+        FRONTLINE_DECAY: float = 0.5 ** (1 / 20)
+        MY_UNIT_DEATH_WEIGHT = 0.25
+        ENEMY_UNIT_DEATH_WEIGHT = 0.16
+        self.frontline_indicator = self.frontline_indicator * FRONTLINE_DECAY + (1 - FRONTLINE_DECAY) * C.MAP_SIZE
+        # 根据死亡单位位置更新frontline_indicator
+        for uid in range(C.MAX_UNITS):
+            task = self.task_list[uid]
+            if not obs.my_units_mask[uid] and task.type != UnitTaskType.DEAD and not obs.is_match_start:
+                dist = int(utils.l1_dist(self.history[-1].my_units_pos[uid], self.base_pos))
+                self.frontline_indicator = self.frontline_indicator * (1 - MY_UNIT_DEATH_WEIGHT) + MY_UNIT_DEATH_WEIGHT * dist
+
+            if obs.opp_units_mask[uid] and obs.opp_units_energy[uid] < 0:
+                dist = int(utils.l1_dist(obs.opp_units_pos[uid], self.base_pos))
+                self.frontline_indicator = self.frontline_indicator * (1 - ENEMY_UNIT_DEATH_WEIGHT) + ENEMY_UNIT_DEATH_WEIGHT * dist
+        self.logger.info(f"Frontline indicator: {self.frontline_indicator}")
 
         # 计算unclustering_cost
         self.unclustering_cost = np.zeros((C.MAP_SIZE, C.MAP_SIZE), dtype=np.int8)
@@ -324,7 +343,11 @@ class Agent():
         relic_center_opp = self.relic_center[utils.l1_dist(self.relic_center, self.base_pos) > C.MAP_SIZE]
         if relic_center_opp.shape[0] > 0:
             for uid in range(C.MAX_UNITS):
-                if self.task_list[uid].type == UnitTaskType.ATTACK or obs.my_units_energy[uid] < 300:
+                if self.task_list[uid].type == UnitTaskType.ATTACK:
+                    continue
+                if obs.my_units_energy[uid] < 250:
+                    continue
+                if self.task_list[uid].type == UnitTaskType.CAPTURE_RELIC and obs.my_units_energy[uid] < 300:
                     continue
 
                 tgt = relic_center_opp[np.random.choice(relic_center_opp.shape[0])]
@@ -812,7 +835,7 @@ class Agent():
             possibility -= len(visible_enemy_on_relic)
             denominator = (real_points_invisible.shape[0] + 0.4 * unknown_points_invisible.shape[0])
             possibility = min(1.0, possibility / denominator)
-            self.logger.info("Possibility of invisible relics: {} / {} = {}".format(
+            self.logger.debug("Possibility of invisible relics: {} / {} = {}".format(
                 possibility * denominator, denominator, possibility))
 
             for r_pos in real_points_invisible:
@@ -1005,8 +1028,9 @@ class Agent():
         relic_center_score[~relic_center_mask] = 0
         if relic_center_mask.shape[0] == 0:
             return
-        base_point = self.relic_center[np.argmax(relic_center_score)]
-        base_point_dist = utils.l1_dist(base_point, self.base_pos)
+        base_point: np.ndarray = self.relic_center[np.argmax(relic_center_score)]
+        # potential_points = base_point + np.linspace(-20, 20, 100) * np.array([1, 1])
+        # base_point = potential_points[np.argmin()]
         self.logger.info(f"Base point: {base_point}")
 
         # 创建备选点列表
@@ -1029,10 +1053,10 @@ class Agent():
         watch_points = np.column_stack((watch_points, angles.flatten()))  # shape (N, 3)
 
         # 根据距离筛选
-        extra_width = float(np.interp(base_point_dist, [10, C.MAP_SIZE], [0, 3]))
         dist_thresh = np.zeros(watch_points.shape[0])
-        dist_thresh = np.interp(angles, [0, np.pi/2, np.pi],
-            [C.RELIC_SPREAD + self.sap_range + self.sensor_range * 2, self.sap_range + extra_width, C.RELIC_SPREAD]
+        dist_thresh = np.interp(angles,
+            [0, np.pi/8, np.pi/2, np.pi],
+            [24, C.RELIC_SPREAD + self.sap_range + self.sensor_range * 2, max(self.sap_range, 4.0), C.RELIC_SPREAD]
         )
         watch_points = watch_points[utils.square_dist(deltas) <= dist_thresh]
 
@@ -1073,7 +1097,7 @@ class Agent():
         obs = self.obs
 
         # 根据到基地距离排序前哨点
-        PREFERRED_DISTANCE = C.MAP_SIZE if (obs.match_steps <= 30) else 12
+        PREFERRED_DISTANCE = C.MAP_SIZE if (obs.match_steps <= 30) else self.frontline_indicator - 5
         if self.watch_points.shape[0] > 0:
             dists = np.abs(utils.l1_dist(self.watch_points[:, :2], self.base_pos) - PREFERRED_DISTANCE)
             self.watch_points = self.watch_points[np.argsort(dists)]
@@ -1110,8 +1134,8 @@ class Agent():
         obs = self.obs
 
         # 根据到基地距离排序各得分点
-        PREFERRED_DISTANCE = 20 if (obs.step % (C.MAX_STEPS_IN_MATCH + 1) <= 30) else 0
-        MAX_POINT_DIST = C.MAP_SIZE + 3
+        PREFERRED_DISTANCE = 20 if (obs.step % (C.MAX_STEPS_IN_MATCH + 1) <= 30) else self.frontline_indicator - 7
+        MAX_POINT_DIST = self.frontline_indicator + 5
         CAPT_RELIC_ENG_WEIGHT = 0.5
         real_points = np.vstack(np.where(
             (self.relic_map == RelicInfo.REAL.value) & (self.game_map.obstacle_map != Landscape.ASTEROID.value)
