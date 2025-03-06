@@ -139,11 +139,11 @@ class Agent():
     """上一个动作"""
     obs: Observation
     """当前观测结果"""
+    opp_menory: np.ndarray
+    """敌方单位的历史观测结果, 形状(MAX_UNITS, 5), 第二维表示(x, y, energy, latency, used_count)"""
 
     task_list: List[UnitTask]
     """单位任务列表"""
-    sap_orders: List[SapOrder]
-    """攻击需求列表"""
 
     logger: Logger = Logger()
 
@@ -171,6 +171,11 @@ class Agent():
 
     def act(self, step: int, obs: Observation, remainingOverageTime: int = 60) -> np.ndarray:
         """step: [0, max_steps_in_match * match_count_per_episode)"""
+
+        # -------------------- 初始化项 --------------------
+        if obs.is_match_start:
+            self.opp_menory = np.zeros((C.MAX_UNITS, 5), dtype=np.int16)
+            self.hit_intensity_map = np.zeros((C.MAP_SIZE, C.MAP_SIZE), dtype=np.float32)
 
         # -------------------- 处理观测结果 --------------------
         self.obs = obs
@@ -206,6 +211,16 @@ class Agent():
             bounds = np.array([u_pos - 1, u_pos + 1])
             bounds = np.clip(bounds, 0, C.MAP_SIZE-1)
             self.unclustering_cost[bounds[0, 0]:bounds[1, 0]+1, bounds[0, 1]:bounds[1, 1]+1] += 3
+
+        # 更新opp_menory
+        self.opp_menory[:, 3] += 1
+        for uid in range(C.MAX_UNITS):
+            if not obs.opp_units_mask[uid]:
+                continue
+            if obs.opp_units_energy[uid] < 0:
+                self.opp_menory[uid] = (-1, -1, -1, 0, 0)
+            else:
+                self.opp_menory[uid] = (obs.opp_units_pos[uid, 0], obs.opp_units_pos[uid, 1], obs.opp_units_energy[uid], 0, 0)
 
         # -------------------- 任务分配预处理 --------------------
 
@@ -375,7 +390,6 @@ class Agent():
             UnitTaskType.EXPLORE: 4.0,
             UnitTaskType.IDLE: 3.0,
         }
-        assert np.all(obs.opp_units_pos[obs.opp_units_mask] >= 0)
         for uid in range(C.MAX_UNITS):
             task = self.task_list[uid]
             u_selector = (self.team_id, uid)
@@ -715,10 +729,33 @@ class Agent():
         # 对称化地图
         self.relic_map = np.maximum(self.relic_map, utils.flip_matrix(self.relic_map))
 
+    hit_intensity_map: np.ndarray
+    """记录地图各个位置的火力密度"""
+    sap_orders: List[SapOrder]
+    """攻击需求列表"""
+    attack_sap_orders: List[SapOrder]
+    """专为攻击而设的sap_orders"""
     def generate_sap_order(self) -> None:
         """生成攻击需求列表"""
         obs = self.obs
         self.sap_orders = []
+        self.attack_sap_orders = []
+
+        # 更新hit_intensity_map
+        HIT_INTENSITY_DECAY = 0.5 ** (1/10)  # 半衰期10回合
+        self.hit_intensity_map *= HIT_INTENSITY_DECAY
+        # 将上回合发动的Sap计入
+        for action in self.last_action:
+            if action[0] != 5:  # Sap
+                continue
+            pos = action[1:]
+            # 中心+1, 周围1格内+sap_dropoff倍
+            bounds = np.clip(np.array([pos - 1, pos + 1]), 0, C.MAP_SIZE-1)
+            self.hit_intensity_map[bounds[0, 0]:bounds[1, 0]+1, bounds[0, 1]:bounds[1, 1]+1] += self.sap_dropoff
+            self.hit_intensity_map[pos[0], pos[1]] += (1 - self.sap_dropoff)
+        # 若本回合观测到敌方单位, 则其位置的hit_intensity_map值清零
+        e_pos = obs.opp_units_pos[obs.opp_units_mask]
+        self.hit_intensity_map[e_pos[:, 0], e_pos[:, 1]] = 0
 
         real_points = np.vstack(np.where(self.relic_map == RelicInfo.REAL.value)).T  # shape (N, 2)
         dists = np.sum(np.abs(real_points - self.base_pos), axis=1)
@@ -765,18 +802,54 @@ class Agent():
             self.sap_orders.append(SapOrder(e_pos, priority, safe_hit_count))
 
         # 针对不在视野内的得分点生成SapOrder
+        MAX_LATENCY = 4
         unknown_points = np.vstack(np.where(self.relic_map == RelicInfo.UNKNOWN.value)).T
         unknown_points_invisible = unknown_points[obs.sensor_mask[unknown_points[:, 0], unknown_points[:, 1]] == 0]
         real_points_invisible = real_points[obs.sensor_mask[real_points[:, 0], real_points[:, 1]] == 0]
         if real_points_invisible.shape[0] > 0:
             possibility: float = (obs.team_points[self.opp_team_id] - self.history[-1].team_points[self.opp_team_id])
             possibility -= len(visible_enemy_on_relic)
-            possibility = min(1.0, possibility / (real_points_invisible.shape[0] + 0.4 * unknown_points_invisible.shape[0]))
+            denominator = (real_points_invisible.shape[0] + 0.4 * unknown_points_invisible.shape[0])
+            possibility = min(1.0, possibility / denominator)
             self.logger.info("Possibility of invisible relics: {} / {} = {}".format(
-                possibility * (real_points_invisible.shape[0] + 0.4 * unknown_points_invisible.shape[0]),
-                (real_points_invisible.shape[0] + 0.4 * unknown_points_invisible.shape[0]), possibility))
+                possibility * denominator, denominator, possibility))
+
             for r_pos in real_points_invisible:
-                self.sap_orders.append(SapOrder(r_pos, ON_RELIC_WEIGHT * possibility, 2))
+                # 生成普通SapOrder
+                normal_prio = ON_RELIC_WEIGHT * possibility * \
+                    float(np.interp(self.hit_intensity_map[r_pos[0], r_pos[1]], [0.5, 2.5], [1.0, 0.0]))
+                self.sap_orders.append(SapOrder(r_pos, normal_prio, 2))
+
+            for r_pos in real_points:
+                # 生成攻击SapOrder
+                attack_prio = possibility if not obs.sensor_mask[r_pos[0], r_pos[1]] else 1.5
+                attack_prio += float(np.interp(self.hit_intensity_map[r_pos[0], r_pos[1]], [0.3, 2.0], [2.0, 0]))  # 低密度区奖励
+                close_enemy = self.opp_menory[
+                    (self.opp_menory[:, 3] <= MAX_LATENCY) & (utils.square_dist(r_pos, self.opp_menory[:, :2]) <= 1)
+                ]
+                for e_data in close_enemy:
+                    e_pos: np.ndarray = e_data[:2]
+                    e_energy: int = e_data[2]
+                    e_used: int = e_data[4]
+
+                    delta_prio = 0.0
+                    if e_energy <= self.sap_cost:
+                        delta_prio = 1.0
+                    elif e_energy <= 2 * self.sap_cost:
+                        delta_prio = 0.5
+                    else:
+                        delta_prio = 0.25
+
+                    delta_prio *= 1.0 if np.array_equal(e_pos, r_pos) else self.sap_dropoff
+
+                    over_hit = e_used - ((e_energy // self.sap_cost) + 1)
+                    delta_prio *= float(np.interp(over_hit, [0, 2], [1.0, 0.25]))
+
+                    attack_prio += delta_prio
+
+                    # TODO: 在SapOrder中记录used的增量
+                attack_prio *= float(np.interp(self.hit_intensity_map[r_pos[0], r_pos[1]], [3.0, 6.0], [1.0, 0.3]))  # 高密度区惩罚
+                self.attack_sap_orders.append(SapOrder(r_pos, attack_prio, 2))
 
         # 累加处于同一位置上的SapOrder的优先级
         self.sap_orders.sort(key=lambda x: (x.target_pos[0], x.target_pos[1], x.priority), reverse=True)  # 位置相同时按优先级降序排列
@@ -790,18 +863,23 @@ class Agent():
             else:
                 curr_idx += 1
 
-        # 每个SapOrder向相邻的SapOrder加上self.sap_dropoff倍的优先级
-        delta_priority = np.zeros(len(self.sap_orders))
-        for i in range(len(self.sap_orders)):
-            for j in range(i+1, len(self.sap_orders)):
-                if np.sum(np.abs(self.sap_orders[i].target_pos - self.sap_orders[j].target_pos)) == 1:
-                    delta_priority[i] += self.sap_dropoff * self.sap_orders[j].priority
-                    delta_priority[j] += self.sap_dropoff * self.sap_orders[i].priority
-        for i in range(len(self.sap_orders)):
-            self.sap_orders[i].priority += delta_priority[i]
+        def __cumulate_priority(orders: List[SapOrder]) -> None:
+            """每个SapOrder向相邻的SapOrder加上self.sap_dropoff倍的优先级"""
+            delta_priority = np.zeros(len(orders))
+            for i in range(len(orders)):
+                for j in range(i+1, len(orders)):
+                    if np.sum(np.abs(orders[i].target_pos - orders[j].target_pos)) == 1:
+                        delta_priority[i] += self.sap_dropoff * orders[j].priority
+                        delta_priority[j] += self.sap_dropoff * orders[i].priority
+            for i in range(len(orders)):
+                orders[i].priority += delta_priority[i]
+        __cumulate_priority(self.sap_orders)
+        __cumulate_priority(self.attack_sap_orders)
 
         self.sap_orders.sort(reverse=True)
+        self.attack_sap_orders.sort(reverse=True)
         if len(self.sap_orders) > 0: self.logger.info(f"Sap orders: {self.sap_orders}")
+        if len(self.attack_sap_orders) > 0: self.logger.info(f"Attack orders: {self.attack_sap_orders}")
 
     def __pred_enemy_pos(self, eid: int) -> np.ndarray:
         """预测指定id的敌方单位下回合的移动, 下标同C.ADJACENT_DELTAS"""
@@ -959,8 +1037,8 @@ class Agent():
 
         # 筛除与得分点相邻的点
         real_points_myhalf = np.column_stack(np.where(self.relic_map == RelicInfo.REAL.value))
+        real_points_myhalf = real_points_myhalf[utils.l1_dist(real_points_myhalf, base_point) <= C.MAP_SIZE]
         if real_points_myhalf.shape[0] > 0:
-            real_points_myhalf = real_points_myhalf[utils.l1_dist(real_points_myhalf, base_point) <= C.MAP_SIZE]
             distances = np.max(np.abs(watch_points[:, :2].reshape(-1, 1, 2) - real_points_myhalf.reshape(1, -1, 2)), axis=2)
             watch_points = watch_points[np.min(distances, axis=1) > 1]
 
@@ -1184,9 +1262,20 @@ class Agent():
             return [self.__find_path_for(uid, np.clip(u_pos + 2 * normalized_dir, 0, C.MAP_SIZE - 1)), 0, 0]
 
         # 若否, 考虑攻击目标点、前进一格或保持不动吸收能量
-        else:
-            return [self.__find_path_for(uid, rough_target, randomness=False), 0, 0]
-            # TODO: 攻击目标点或保持不动
+        elif u_energy >= self.sap_cost:
+            MIN_PRIO = float(np.interp(u_energy,
+                                       [self.sap_cost + 10, self.sap_cost * 2, self.sap_cost * 4],
+                                       [10.0, 7.5, 4.0]))
+            for order in self.attack_sap_orders:
+                if order.priority < MIN_PRIO:
+                    break
+                delta_pos = order.target_pos - u_pos
+                if utils.square_dist(delta_pos) <= self.sap_range:
+                    return [5, delta_pos[0], delta_pos[1]]
+
+            # 保持不动
+            return [0, 0, 0]
+        return [self.__find_path_for(uid, rough_target, randomness=False), 0, 0]
 
     @staticmethod
     def energy_weight_fn(energy: int, move_cost: int) -> float:
