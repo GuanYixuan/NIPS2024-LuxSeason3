@@ -210,7 +210,7 @@ class Agent():
             u_pos = obs.my_units_pos[uid]
             bounds = np.array([u_pos - 1, u_pos + 1])
             bounds = np.clip(bounds, 0, C.MAP_SIZE-1)
-            self.unclustering_cost[bounds[0, 0]:bounds[1, 0]+1, bounds[0, 1]:bounds[1, 1]+1] += 1
+            self.unclustering_cost[bounds[0, 0]:bounds[1, 0]+1, bounds[0, 1]:bounds[1, 1]+1] += 3
 
         # 更新opp_menory
         self.opp_menory[:, 3] += 1
@@ -306,7 +306,8 @@ class Agent():
                 if (u1_on_spot or u2_on_spot) and (utils.l1_dist(u1_pos, u2_pos) > 1):
                     continue  # 避免干扰生产
 
-                delta_tgt_dist = utils.l1_dist(self.base_pos, u1_task.target_pos) - utils.l1_dist(self.base_pos, u2_task.target_pos)
+                delta_tgt_dist = utils.l1_dist(self.base_pos, u1_task.target_pos) - \
+                                 utils.l1_dist(self.base_pos, u2_task.target_pos)
                 if abs(delta_tgt_dist) >= 3 and np.sign(delta_tgt_dist) != np.sign(u1_energy - u2_energy):
                     swp = u1_task, u2_task
                     self.task_list[u2], self.task_list[u1] = swp
@@ -502,7 +503,7 @@ class Agent():
 
                 if high_eng_pts.shape[0]:
                     target_pos = high_eng_pts[np.argmax(high_eng_pts[:, 2])][:2]
-                    actions[uid] = [self.__find_path_for(uid, task.target_pos), 0, 0]
+                    actions[uid] = [self.__find_path_for(uid, target_pos), 0, 0]
 
         # 保存历史观测结果
         self.history.append(obs)
@@ -1115,8 +1116,8 @@ class Agent():
         real_points = np.vstack(np.where(
             (self.relic_map == RelicInfo.REAL.value) & (self.game_map.obstacle_map != Landscape.ASTEROID.value)
         )).T  # shape (N, 2)
-        dists = np.sum(np.abs(real_points - self.base_pos), axis=1) # 距离合适的点
-        argsort = np.argsort(np.abs(dists- PREFERRED_DISTANCE) - \
+        dists = np.sum(np.abs(real_points - self.base_pos), axis=1)  # 距离合适的点
+        argsort = np.argsort(np.abs(dists - PREFERRED_DISTANCE) -
                              CAPT_RELIC_ENG_WEIGHT * self.game_map.energy_map[real_points[:, 0], real_points[:, 1]])
         dists = dists[argsort]
         real_points = real_points[argsort]  # 按到基地距离和能量排序
@@ -1132,7 +1133,7 @@ class Agent():
 
             dists = np.sum(np.abs(obs.my_units_pos - real_pos), axis=1)
             free_mask = np.array([
-                t.type in (UnitTaskType.IDLE, UnitTaskType.INVESTIGATE, UnitTaskType.EXPLORE, UnitTaskType.ATTACK) and \
+                t.type in (UnitTaskType.IDLE, UnitTaskType.INVESTIGATE, UnitTaskType.EXPLORE, UnitTaskType.ATTACK) and
                 t.priority < 1 for t in self.task_list])
             if not np.any(free_mask):
                 break  # 所有单位都有更高优先级任务
@@ -1311,19 +1312,17 @@ class Agent():
     @staticmethod
     def __heuristic_right(pos: np.ndarray, target_pos: np.ndarray) -> float:
         return pos[0] * 0.2
-    def __find_path_for(self, uid: int, target_pos: np.ndarray, randomness: bool = True, extra_cost: Optional[np.ndarray] = None) -> int:
+    def __find_path_for(self, uid: int, target_pos: np.ndarray, randomness: bool = True,
+                        extra_cost: Optional[np.ndarray] = None) -> int:
         """寻找从当前位置到target_pos的路径, 并返回下一步方向"""
         u_energy = self.obs.my_units_energy[uid]
         u_pos = self.obs.my_units_pos[uid]
-        if extra_cost is None:
-            extra_cost = self.unclustering_cost
-        else:
-            extra_cost = extra_cost + self.unclustering_cost
         if not randomness or self.obs.match_steps <= 30:
             return self.game_map.direction_to(u_pos, target_pos,
-                                              self.energy_weight_fn(u_energy, self.game_map.move_cost), extra_cost=extra_cost)
+                                              self.energy_weight_fn(u_energy, self.game_map.move_cost),
+                                              extra_cost=extra_cost, extra_heuristic=self.unclustering_cost)
         else:
             heuristic_fn = self.__heuristic_left if uid % 2 == 0 else self.__heuristic_right
             return self.game_map.direction_to(u_pos, target_pos,
                                               self.energy_weight_fn(u_energy, self.game_map.move_cost),
-                                              heuristic_fn, extra_cost=extra_cost)
+                                              heuristic_fn, extra_cost=extra_cost, extra_heuristic=self.unclustering_cost)

@@ -126,7 +126,8 @@ class Map:
 
     def direction_to(self, src: np.ndarray, dst: np.ndarray, energy_weight: float,
                      _heuristic: Callable[[np.ndarray, np.ndarray], float] = __l1_heuristic,
-                     extra_cost: Optional[np.ndarray] = None) -> int:
+                     extra_cost: Optional[np.ndarray] = None,
+                     extra_heuristic: Optional[np.ndarray] = None) -> int:
         """利用A*算法计算从src到dst的下一步方向"""
         src = np.array(src)
         dst = np.array(dst)
@@ -228,6 +229,8 @@ class Map:
                 if tentative_g_score < g_scores[next_pos]:
                     g_scores[next_pos] = tentative_g_score
                     f_score = tentative_g_score + heuristic(neighbor)
+                    if extra_heuristic is not None:
+                        f_score += float(extra_heuristic[next_pos])
                     came_from[next_pos] = current_pos
                     heapq.heappush(open_queue, (f_score, tentative_g_score, steps + 1, next_pos))
 
