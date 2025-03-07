@@ -335,6 +335,7 @@ class Agent():
                     swapped[u1] = True
                     swapped[u2] = True
                     self.logger.info(f"Task swap: {swp[0]} <-> {swp[1]} at {u1_pos}")
+                    break
 
         allocated_unknown_positions: Set[Tuple[int, int]] = \
             set([(t.target_pos[0], t.target_pos[1]) for t in self.task_list if t.type == UnitTaskType.INVESTIGATE])
@@ -412,7 +413,7 @@ class Agent():
             UnitTaskType.CAPTURE_RELIC: 5.5,
             UnitTaskType.INVESTIGATE: 5.0,
             UnitTaskType.DEFEND: 5.0,
-            UnitTaskType.ATTACK: 8.0,
+            UnitTaskType.ATTACK: 15.0,
             UnitTaskType.EXPLORE: 4.0,
             UnitTaskType.IDLE: 3.0,
         }
@@ -428,13 +429,15 @@ class Agent():
 
             # 若相邻格有比自己能量低的敌方单位, 则直接走向敌方
             action_decided = False
+            curr_pos_units_mask = np.all(obs.my_units_pos == u_pos, axis=1) & obs.my_units_mask
+            curr_pos_energy = np.sum(obs.my_units_energy[curr_pos_units_mask])
             for i, delta in enumerate(C.DIRECTIONS):
                 enemy_pos = u_pos + delta
                 enemy_mask = np.all(obs.opp_units_pos == enemy_pos, axis=1) & obs.opp_units_mask
                 if not np.any(enemy_mask):
                     continue
                 total_energy = np.sum(obs.opp_units_energy[enemy_mask])
-                if total_energy <= u_energy:
+                if total_energy < curr_pos_energy - np.count_nonzero(curr_pos_units_mask) * self.game_map.move_cost:
                     actions[uid] = [i+1, 0, 0]
                     self.logger.info(f"Unit {uid} -> crash {enemy_pos}")
                 else:
@@ -452,7 +455,7 @@ class Agent():
                            [1.7, 1.0, 1.0, 0.8]
                 ))
                 saps_in_range_mask = np.array([
-                    np.max(np.abs(u_pos - sap.target_pos)) <= self.sap_range and not sap.satisfied()
+                    utils.square_dist(u_pos - sap.target_pos) <= self.sap_range and not sap.satisfied()
                     for sap in self.sap_orders
                 ])
                 if np.any(saps_in_range_mask):
@@ -813,7 +816,7 @@ class Agent():
             if not obs.units_mask[self.team_id, eid] or e_energy < 0:
                 continue
 
-            priority = 1.0
+            priority: float = 1.0
 
             # 按条件累加优先级
             # 1. 在我方半区得分点附近
@@ -837,10 +840,9 @@ class Agent():
             if not on_relic and enemy_can_move:
                 e_pos += C.ADJACENT_DELTAS[np.argmax(self.__pred_enemy_pos(eid))]
 
-            # TODO: 融合多个相邻的SapOrder
             need_hit_count = int(e_energy / self.sap_cost) + 1
-            safe_hit_count = need_hit_count + 0 if (self.sap_dropoff == 1 or not enemy_can_move) else 1
-            self.sap_orders.append(SapOrder(e_pos, priority, safe_hit_count))
+            safe_hit_count = need_hit_count + (0 if (self.sap_dropoff == 1 or not enemy_can_move) else 1)
+            self.sap_orders.append(SapOrder(e_pos, priority, min(safe_hit_count, int(priority / 3), 4)))
 
         # 针对不在视野内的得分点生成SapOrder
         MAX_LATENCY = 4
@@ -869,7 +871,7 @@ class Agent():
             visible = obs.sensor_mask[pos_tup]
             # 生成攻击SapOrder
             attack_prio = possibility if (not visible and possibility is not None) else 0.0
-            attack_prio += float(np.interp(self.game_map.energy_map[pos_tup], [-6, 0], [2.0, 0]))  # 低能量奖励
+            attack_prio += float(np.interp(self.game_map.energy_map[pos_tup], [-6, 0, 6], [2.0, 0, -2.0]))  # 能量奖励
             attack_prio += float(np.interp(self.hit_intensity_map[pos_tup], [0.3, 2.0], [2.0, 0]))  # 低密度区奖励
             close_enemy = self.opp_menory[
                 (self.opp_menory[:, 3] <= MAX_LATENCY) & (utils.square_dist(r_pos, self.opp_menory[:, :2]) <= 1)
@@ -915,12 +917,32 @@ class Agent():
             else:
                 curr_idx += 1
 
+        # 为每个SapOrder在四周创建空的SapOrder，方便后续的聚合
+        def __create_empty_order(orders: List[SapOrder]) -> None:
+            new_orders = []
+            curr_order_pos = np.array([ord.target_pos for ord in orders])
+            curr_order_hits = np.array([ord.need_hit_count for ord in orders])
+            for order in orders:
+                for delta in C.DIRECTIONS:
+                    new_pos = order.target_pos + delta
+                    if not np.all(new_pos >= 0) or not np.all(new_pos < C.MAP_SIZE):
+                        continue
+                    if np.any(np.all(new_pos == curr_order_pos, axis=1)):
+                        continue
+                    adjacent_order_mask = utils.square_dist(new_pos, curr_order_pos) == 1
+                    if np.count_nonzero(adjacent_order_mask) == 1:
+                        continue
+                    new_orders.append(SapOrder(new_pos, 0.0, np.max(curr_order_hits[adjacent_order_mask])))
+            orders.extend(new_orders)
+        __create_empty_order(self.sap_orders)
+        __create_empty_order(self.attack_sap_orders)
+
         def __cumulate_priority(orders: List[SapOrder]) -> None:
             """每个SapOrder向相邻的SapOrder加上self.sap_dropoff倍的优先级"""
             delta_priority = np.zeros(len(orders))
             for i in range(len(orders)):
                 for j in range(i+1, len(orders)):
-                    if np.sum(np.abs(orders[i].target_pos - orders[j].target_pos)) == 1:
+                    if utils.square_dist(orders[i].target_pos, orders[j].target_pos) == 1:
                         delta_priority[i] += self.sap_dropoff * orders[j].priority
                         delta_priority[j] += self.sap_dropoff * orders[i].priority
             for i in range(len(orders)):
