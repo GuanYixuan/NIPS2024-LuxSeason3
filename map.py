@@ -127,7 +127,7 @@ class Map:
     def direction_to(self, src: np.ndarray, dst: np.ndarray, energy_weight: float,
                      _heuristic: Callable[[np.ndarray, np.ndarray], float] = __l1_heuristic,
                      extra_cost: Optional[np.ndarray] = None,
-                     extra_heuristic: Optional[np.ndarray] = None) -> int:
+                     collision_info: Optional[np.ndarray] = None) -> int:
         """利用A*算法计算从src到dst的下一步方向"""
         src = np.array(src)
         dst = np.array(dst)
@@ -187,7 +187,6 @@ class Map:
 
             if np.array_equal(current_pos, dst):
                 # 回溯找到第一步
-                current_pos = dst
                 while not np.array_equal(current_pos, src):
                     parent_pos = came_from[current_pos[0], current_pos[1]]
                     if np.array_equal(parent_pos, src):
@@ -222,15 +221,15 @@ class Map:
 
                 # 根据步数决定是否考虑能量图
                 energy_factor = self.full_energy_map[next_pos] * energy_weight if steps <= 8 else 0
-                tentative_g_score: float = g_score + max(0, 1 - energy_factor)  # type: ignore
+                tentative_g_score: float = g_score + max(0.1, 1 - energy_factor)  # type: ignore
                 if extra_cost is not None:
                     tentative_g_score += extra_cost[next_pos]  # type: ignore
+                if collision_info is not None and utils.l1_dist(neighbor, src) == 1:
+                    tentative_g_score += float(collision_info[next_pos])
 
                 if tentative_g_score < g_scores[next_pos]:
                     g_scores[next_pos] = tentative_g_score
                     f_score = tentative_g_score + heuristic(neighbor)
-                    if extra_heuristic is not None:
-                        f_score += float(extra_heuristic[next_pos])
                     came_from[next_pos] = current_pos
                     heapq.heappush(open_queue, (f_score, tentative_g_score, steps + 1, next_pos))
 

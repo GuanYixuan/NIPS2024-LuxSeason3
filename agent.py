@@ -219,17 +219,18 @@ class Agent():
         self.logger.info(f"Frontline indicator: {self.frontline_indicator}")
 
         # 计算unclustering_cost
-        self.unclustering_cost = np.zeros((C.MAP_SIZE, C.MAP_SIZE), dtype=np.int8)
-        for uid in range(C.MAX_UNITS):
-            if not obs.my_units_mask[uid]:
-                continue
-            if obs.my_units_energy[uid] < 0:
-                continue
+        self.unclustering_cost = np.zeros((C.MAP_SIZE, C.MAP_SIZE), dtype=np.float32)
+        # for uid in range(C.MAX_UNITS):
+        #     if not obs.my_units_mask[uid]:
+        #         continue
+        #     if obs.my_units_energy[uid] < 0:
+        #         continue
 
-            u_pos = obs.my_units_pos[uid]
-            bounds = np.array([u_pos - 1, u_pos + 1])
-            bounds = np.clip(bounds, 0, C.MAP_SIZE-1)
-            self.unclustering_cost[bounds[0, 0]:bounds[1, 0]+1, bounds[0, 1]:bounds[1, 1]+1] += 3
+        #     u_pos = obs.my_units_pos[uid]
+        #     bounds = np.array([u_pos - 1, u_pos + 1])
+        #     bounds = np.clip(bounds, 0, C.MAP_SIZE-1)
+        #     self.unclustering_cost[bounds[0, 0]:bounds[1, 0]+1, bounds[0, 1]:bounds[1, 1]+1] += 0.1
+        # self.logger.info(f"Unclustering cost: \n{self.unclustering_cost.T}")
 
         # 更新opp_menory
         self.opp_menory[:, 3] += 1
@@ -1330,23 +1331,11 @@ class Agent():
         else:
             return 0.05
 
-    @staticmethod
-    def __heuristic_left(pos: np.ndarray, target_pos: np.ndarray) -> float:
-        return -pos[0] * 0.2
-    @staticmethod
-    def __heuristic_right(pos: np.ndarray, target_pos: np.ndarray) -> float:
-        return pos[0] * 0.2
     def __find_path_for(self, uid: int, target_pos: np.ndarray, randomness: bool = True,
                         extra_cost: Optional[np.ndarray] = None) -> int:
         """寻找从当前位置到target_pos的路径, 并返回下一步方向"""
         u_energy = self.obs.my_units_energy[uid]
         u_pos = self.obs.my_units_pos[uid]
-        if not randomness or self.obs.match_steps <= 30:
-            return self.game_map.direction_to(u_pos, target_pos,
-                                              self.energy_weight_fn(u_energy, self.game_map.move_cost),
-                                              extra_cost=extra_cost, extra_heuristic=self.unclustering_cost)
-        else:
-            heuristic_fn = self.__heuristic_left if uid % 2 == 0 else self.__heuristic_right
-            return self.game_map.direction_to(u_pos, target_pos,
-                                              self.energy_weight_fn(u_energy, self.game_map.move_cost),
-                                              heuristic_fn, extra_cost=extra_cost, extra_heuristic=self.unclustering_cost)
+        return self.game_map.direction_to(u_pos, target_pos,
+                                          self.energy_weight_fn(u_energy, self.game_map.move_cost),
+                                          extra_cost=extra_cost, collision_info=self.unclustering_cost)
