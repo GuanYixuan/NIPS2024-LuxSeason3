@@ -297,18 +297,19 @@ class Agent():
                 self.task_list[uid].clear()
 
         # 进行任务交换：相邻的两个单位, 能量较高者执行距离基地更远的任务
+        swapped = np.zeros(C.MAX_UNITS, dtype=bool)
         for u1 in range(C.MAX_UNITS):
             u1_task = self.task_list[u1]
             u1_pos = obs.my_units_pos[u1]
             u1_energy = obs.my_units_energy[u1]
-            if u1_task.type == UnitTaskType.DEAD:
+            if u1_task.type == UnitTaskType.DEAD or swapped[u1]:
                 continue
 
             for u2 in range(u1+1, C.MAX_UNITS):
                 u2_task = self.task_list[u2]
                 u2_pos = obs.my_units_pos[u2]
                 u2_energy = obs.my_units_energy[u2]
-                if u2_task.type == UnitTaskType.DEAD:
+                if u2_task.type == UnitTaskType.DEAD or swapped[u2]:
                     continue
 
                 if abs(u1_energy - u2_energy) <= 40:
@@ -331,6 +332,8 @@ class Agent():
                 if abs(delta_tgt_dist) >= 3 and np.sign(delta_tgt_dist) != np.sign(u1_energy - u2_energy):
                     swp = u1_task, u2_task
                     self.task_list[u2], self.task_list[u1] = swp
+                    swapped[u1] = True
+                    swapped[u2] = True
                     self.logger.info(f"Task swap: {swp[0]} <-> {swp[1]} at {u1_pos}")
 
         allocated_unknown_positions: Set[Tuple[int, int]] = \
