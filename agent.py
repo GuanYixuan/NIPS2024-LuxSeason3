@@ -344,11 +344,9 @@ class Agent():
         relic_center_opp = self.relic_center[utils.l1_dist(self.relic_center, self.base_pos) > C.MAP_SIZE]
         if relic_center_opp.shape[0] > 0:
             for uid in range(C.MAX_UNITS):
-                if self.task_list[uid].type == UnitTaskType.ATTACK:
+                if self.task_list[uid].type == UnitTaskType.ATTACK or self.task_list[uid].type == UnitTaskType.CAPTURE_RELIC:
                     continue
                 if obs.my_units_energy[uid] < 250:
-                    continue
-                if self.task_list[uid].type == UnitTaskType.CAPTURE_RELIC and obs.my_units_energy[uid] < 300:
                     continue
 
                 tgt = relic_center_opp[np.random.choice(relic_center_opp.shape[0])]
@@ -410,8 +408,8 @@ class Agent():
         MIN_SAP_PRIORITY: Dict[UnitTaskType, float] = {
             UnitTaskType.CAPTURE_RELIC: 5.5,
             UnitTaskType.INVESTIGATE: 5.0,
-            UnitTaskType.DEFEND: 3.0,
-            UnitTaskType.ATTACK: 15.0,
+            UnitTaskType.DEFEND: 5.0,
+            UnitTaskType.ATTACK: 8.0,
             UnitTaskType.EXPLORE: 4.0,
             UnitTaskType.IDLE: 3.0,
         }
@@ -445,7 +443,11 @@ class Agent():
                 continue
 
             # 判断是否进行Sap攻击
-            if u_energy >= 1.5 * self.sap_cost:
+            if u_energy >= self.sap_cost + 10:
+                min_prio = MIN_SAP_PRIORITY[task.type] * float(np.interp(u_energy,
+                           [self.sap_cost + 10, 1.5*self.sap_cost, 4*self.sap_cost, 8*self.sap_cost],
+                           [1.7, 1.0, 1.0, 0.8]
+                ))
                 saps_in_range_mask = np.array([
                     np.max(np.abs(u_pos - sap.target_pos)) <= self.sap_range and not sap.satisfied()
                     for sap in self.sap_orders
@@ -454,7 +456,7 @@ class Agent():
                     selected_sap = np.argmax(saps_in_range_mask)
                     sap_priority = self.sap_orders[selected_sap].priority
                     sap_target = self.sap_orders[selected_sap].target_pos
-                    if sap_priority >= MIN_SAP_PRIORITY[task.type]:
+                    if sap_priority >= min_prio:
                         actions[uid] = [5, sap_target[0]-u_pos[0], sap_target[1]-u_pos[1]]
                         self.sap_orders[selected_sap].fulfilled_count += 1
                         self.logger.info(f"Unit {uid} -> sap {sap_target}")
@@ -500,6 +502,21 @@ class Agent():
 
             # DEFEND任务: 移动到指定点并防御
             elif task.type == UnitTaskType.DEFEND:
+                best_target = None
+                max_eng = -1
+                for eid in range(C.MAX_UNITS):
+                    if not obs.opp_units_mask[eid]:
+                        continue
+                    e_pos = obs.opp_units_pos[eid]
+                    e_energy = obs.opp_units_energy[eid]
+                    if utils.l1_dist(u_pos, e_pos) <= 5 and u_energy > e_energy + 30:
+                        if e_energy > max_eng:
+                            max_eng = e_energy
+                            best_target = e_pos
+                if best_target is not None:
+                    actions[uid] = [self.__find_path_for(uid, best_target), 0, 0]
+                    self.logger.info(f"Unit {uid} -> chasing {best_target}")
+
                 if np.array_equal(u_pos, task.target_pos):
                     # TODO: 随机移动
                     pass
@@ -810,12 +827,8 @@ class Agent():
             elif e_energy == 0:
                 continue  # 无能量且不在得分点上的敌人可放置以拖延时间
 
-            # 3. 能量较低
-            need_dropoff = e_energy // (self.sap_cost * self.sap_dropoff) + 1
-            if need_dropoff <= 1:
-                priority += 2.0
-            elif need_dropoff <= 2:
-                priority += 1.0
+            # 3. 能量较高
+            priority += float(np.interp(e_energy, [100, 150, 250, 300], [0.0, 1.0, 2.0, 2.5]))
 
             # 打提前量
             if not on_relic and enemy_can_move:
@@ -828,11 +841,13 @@ class Agent():
 
         # 针对不在视野内的得分点生成SapOrder
         MAX_LATENCY = 4
+        possibility: Optional[float] = None
         unknown_points = np.vstack(np.where(self.relic_map == RelicInfo.UNKNOWN.value)).T
         unknown_points_invisible = unknown_points[obs.sensor_mask[unknown_points[:, 0], unknown_points[:, 1]] == 0]
         real_points_invisible = real_points[obs.sensor_mask[real_points[:, 0], real_points[:, 1]] == 0]
         if real_points_invisible.shape[0] > 0:
-            possibility: float = (obs.team_points[self.opp_team_id] - self.history[-1].team_points[self.opp_team_id])
+            possibility = (obs.team_points[self.opp_team_id] - self.history[-1].team_points[self.opp_team_id])
+            assert possibility is not None
             possibility -= len(visible_enemy_on_relic)
             denominator = (real_points_invisible.shape[0] + 0.4 * unknown_points_invisible.shape[0])
             possibility = min(1.0, possibility / denominator)
@@ -842,45 +857,48 @@ class Agent():
             for r_pos in real_points_invisible:
                 # 生成普通SapOrder
                 normal_prio = ON_RELIC_WEIGHT * possibility * \
-                    float(np.interp(self.hit_intensity_map[r_pos[0], r_pos[1]], [0.5, 2.0], [1.0, 0.0]))
+                    float(np.interp(self.hit_intensity_map[r_pos[0], r_pos[1]], [0.5, 2.0], [1.0, 0.0])) * \
+                    float(np.interp(self.game_map.energy_map[r_pos[0], r_pos[1]], [-6, 0], [1.5, 1.0]))
                 self.sap_orders.append(SapOrder(r_pos, normal_prio, 2))
 
-            for r_pos in real_points:
-                # 生成攻击SapOrder
-                attack_prio = possibility if not obs.sensor_mask[r_pos[0], r_pos[1]] else 0.0
-                attack_prio += float(np.interp(self.hit_intensity_map[r_pos[0], r_pos[1]], [0.3, 2.0], [2.0, 0]))  # 低密度区奖励
-                close_enemy = self.opp_menory[
-                    (self.opp_menory[:, 3] <= MAX_LATENCY) & (utils.square_dist(r_pos, self.opp_menory[:, :2]) <= 1)
-                ]
-                if obs.sensor_mask[r_pos[0], r_pos[1]] and \
-                   not np.any(utils.square_dist(r_pos, obs.opp_units_pos[obs.opp_units_mask]) == 0):
-                    continue
-                for e_data in close_enemy:
-                    e_pos: np.ndarray = e_data[:2]
-                    e_energy: int = e_data[2]
-                    e_used: int = e_data[4]
+        for r_pos in real_points:
+            pos_tup = tuple(r_pos)
+            visible = obs.sensor_mask[pos_tup]
+            # 生成攻击SapOrder
+            attack_prio = possibility if (not visible and possibility is not None) else 0.0
+            attack_prio += float(np.interp(self.game_map.energy_map[pos_tup], [-6, 0], [2.0, 0]))  # 低能量奖励
+            attack_prio += float(np.interp(self.hit_intensity_map[pos_tup], [0.3, 2.0], [2.0, 0]))  # 低密度区奖励
+            close_enemy = self.opp_menory[
+                (self.opp_menory[:, 3] <= MAX_LATENCY) & (utils.square_dist(r_pos, self.opp_menory[:, :2]) <= 1)
+            ]
+            if visible and not np.any(utils.square_dist(r_pos, obs.opp_units_pos[obs.opp_units_mask]) == 0):
+                continue
+            for e_data in close_enemy:
+                e_pos: np.ndarray = e_data[:2]
+                e_energy: int = e_data[2]
+                e_used: int = e_data[4]
 
-                    delta_prio = 0.0
-                    if e_energy <= self.sap_cost:
-                        delta_prio = 1.0
-                    elif e_energy <= 2 * self.sap_cost:
-                        delta_prio = 0.5
-                    else:
-                        delta_prio = 0.25
+                delta_prio = 0.0
+                if e_energy <= self.sap_cost:
+                    delta_prio = 1.0
+                elif e_energy <= 2 * self.sap_cost:
+                    delta_prio = 0.5
+                else:
+                    delta_prio = 0.25
 
-                    delta_prio *= 1.0 if np.array_equal(e_pos, r_pos) else self.sap_dropoff
+                delta_prio *= 1.0 if np.array_equal(e_pos, r_pos) else self.sap_dropoff
 
-                    over_hit = e_used - ((e_energy // self.sap_cost) + 1)
-                    delta_prio *= float(np.interp(over_hit, [0, 2], [1.0, 0.25]))
+                over_hit = e_used - ((e_energy // self.sap_cost) + 1)
+                delta_prio *= float(np.interp(over_hit, [0, 2], [1.0, 0.25]))
 
-                    if e_data[3] <= 1:  # 目前可见
-                        delta_prio += 2.0
+                if e_data[3] <= 1:  # 目前可见
+                    delta_prio += 2.0
 
-                    attack_prio += delta_prio
+                attack_prio += delta_prio
 
-                    # TODO: 在SapOrder中记录used的增量
-                attack_prio *= float(np.interp(self.hit_intensity_map[r_pos[0], r_pos[1]], [3.0, 6.0], [1.0, 0.3]))  # 高密度区惩罚
-                self.attack_sap_orders.append(SapOrder(r_pos, attack_prio, 2))
+                # TODO: 在SapOrder中记录used的增量
+            attack_prio *= float(np.interp(self.hit_intensity_map[pos_tup], [2.5, 6.0], [1.0, 0.3]))  # 高密度区惩罚
+            self.attack_sap_orders.append(SapOrder(r_pos, attack_prio, 2))
 
         # 累加处于同一位置上的SapOrder的优先级
         self.sap_orders.sort(key=lambda x: (x.target_pos[0], x.target_pos[1], x.priority), reverse=True)  # 位置相同时按优先级降序排列
@@ -1135,7 +1153,7 @@ class Agent():
         obs = self.obs
 
         # 根据到基地距离排序各得分点
-        PREFERRED_DISTANCE = 20 if (obs.step % (C.MAX_STEPS_IN_MATCH + 1) <= 30) else self.frontline_indicator - 7
+        PREFERRED_DISTANCE = 20 if (obs.step % (C.MAX_STEPS_IN_MATCH + 1) <= 30) else 0
         MAX_POINT_DIST = self.frontline_indicator + 5
         CAPT_RELIC_ENG_WEIGHT = 0.5
         real_points = np.vstack(np.where(
@@ -1297,7 +1315,7 @@ class Agent():
         elif u_energy >= self.sap_cost:
             MIN_PRIO = float(np.interp(u_energy,
                                        [self.sap_cost + 10, self.sap_cost * 2, self.sap_cost * 4, self.sap_cost * 6],
-                                       [10.0, 7.5, 3.0, 2.0]))
+                                       [7.0, 4.5, 2.0, 1.0]))
             self.logger.info(f"Unit {uid} (eng {obs.my_units_energy[uid]}) finding sap with priority {MIN_PRIO}")
             for order in self.attack_sap_orders:
                 if order.priority < MIN_PRIO:
