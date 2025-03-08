@@ -937,7 +937,7 @@ class Agent():
                 if np.array_equal(e_pos, r_pos):
                     vis_enemy_hp = max(vis_enemy_hp, e_energy)
                 else:
-                    delta_prio *=  self.sap_dropoff
+                    delta_prio *= self.sap_dropoff
 
                 over_hit = e_used - ((e_energy // self.sap_cost) + 1)
                 delta_prio *= float(np.interp(over_hit, [0, 2], [1.0, 0.25]))
@@ -1139,10 +1139,16 @@ class Agent():
             elif angle <= np.pi/2:
                 return 0.8
             return 0.6
-        FORWARD_DIR = np.full((2,), 1/np.sqrt(2)) * (-1 if self.team_id else 1)
+        forward_dir = np.full((2,), 1/np.sqrt(2)) * (-1 if self.team_id else 1)
+        to_base_dir = (utils.flip_coord(self.base_pos) - base_point).astype(np.float32)
+        to_base_dir /= np.linalg.norm(to_base_dir)
+        to_base_dir_weight = float(np.interp(utils.l1_dist(self.base_pos, base_point), [0, 20], [0.2, 1.0]))
+        forward_dir = forward_dir * (1 - to_base_dir_weight) + to_base_dir * to_base_dir_weight
+        self.logger.info(f"Forward direction: {forward_dir}")
+
         deltas = watch_points - base_point
         delta_dirs = deltas / np.linalg.norm(deltas, axis=1, keepdims=True)
-        angles = np.arccos(np.clip(delta_dirs @ FORWARD_DIR, -1.0, 1.0))
+        angles = np.arccos(np.clip(delta_dirs @ forward_dir, -1.0, 1.0))
         watch_points = np.column_stack((watch_points, angles.flatten()))  # shape (N, 3)
 
         # 根据距离筛选
