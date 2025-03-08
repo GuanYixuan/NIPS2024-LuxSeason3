@@ -67,12 +67,12 @@ class SapOrder:
     """目标位置"""
     priority: float
     """目标优先级"""
-    need_hit_count: int
+    need_hit_count: float
     """需要的命中数"""
-    fulfilled_count: int
+    fulfilled_count: float
     """已分配的命中数"""
 
-    def __init__(self, target_pos: np.ndarray, priority: float, need_hit_count: int) -> None:
+    def __init__(self, target_pos: np.ndarray, priority: float, need_hit_count: float) -> None:
         self.target_pos = target_pos
         self.priority = priority
         self.need_hit_count = need_hit_count
@@ -499,7 +499,14 @@ class Agent():
                     sap_target = self.sap_orders[selected_sap].target_pos
                     if sap_priority >= min_prio:
                         actions[uid] = [5, sap_target[0]-u_pos[0], sap_target[1]-u_pos[1]]
-                        self.sap_orders[selected_sap].fulfilled_count += 1
+
+                        # 更新Sap需求状态
+                        for sap in self.sap_orders:
+                            sq_dist = utils.square_dist(sap_target, sap.target_pos)
+                            if sq_dist == 0:
+                                sap.fulfilled_count += 1
+                            elif sq_dist == 1:
+                                sap.fulfilled_count += self.sap_dropoff
                         self.logger.info(f"Unit {uid} -> sap {sap_target}")
                         continue
 
@@ -906,39 +913,46 @@ class Agent():
             visible = obs.sensor_mask[pos_tup]
             # 生成攻击SapOrder
             attack_prio = possibility if (not visible and possibility is not None) else 0.0
-            attack_prio += float(np.interp(self.game_map.energy_map[pos_tup], [-6, 0, 6], [2.0, 0, -2.0]))  # 能量奖励
-            attack_prio += float(np.interp(self.hit_intensity_map[pos_tup], [0.3, 2.0], [2.0, 0]))  # 低密度区奖励
+            if not visible:
+                attack_prio += float(np.interp(self.game_map.energy_map[pos_tup], [-6, 0, 6], [2.0, 0, -2.0]))  # 能量奖励
+                attack_prio += float(np.interp(self.hit_intensity_map[pos_tup], [0.3, 2.0], [2.0, 0]))  # 低密度区奖励
             close_enemy = self.opp_menory[
                 (self.opp_menory[:, 3] <= MAX_LATENCY) & (utils.square_dist(r_pos, self.opp_menory[:, :2]) <= 1)
             ]
             if visible and not np.any(utils.square_dist(r_pos, obs.opp_units_pos[obs.opp_units_mask]) == 0):
                 continue
+            vis_enemy_hp = -1
             for e_data in close_enemy:
                 e_pos: np.ndarray = e_data[:2]
                 e_energy: int = e_data[2]
+                e_last_seen: int = e_data[3]
                 e_used: int = e_data[4]
 
                 delta_prio = 0.0
-                if e_energy <= self.sap_cost:
-                    delta_prio = 1.0
-                elif e_energy <= 2 * self.sap_cost:
-                    delta_prio = 0.5
-                else:
-                    delta_prio = 0.25
+                delta_prio += float(np.interp(e_energy,
+                    [self.sap_cost, 2 * self.sap_cost, 4 * self.sap_cost],
+                    [1.5, 0.7, 0.25]
+                ))
 
-                delta_prio *= 1.0 if np.array_equal(e_pos, r_pos) else self.sap_dropoff
+                if np.array_equal(e_pos, r_pos):
+                    vis_enemy_hp = max(vis_enemy_hp, e_energy)
+                else:
+                    delta_prio *=  self.sap_dropoff
 
                 over_hit = e_used - ((e_energy // self.sap_cost) + 1)
                 delta_prio *= float(np.interp(over_hit, [0, 2], [1.0, 0.25]))
 
-                if e_data[3] <= 1:  # 目前可见
+                if e_last_seen <= 1:  # 目前可见
                     delta_prio += 2.0
 
                 attack_prio += delta_prio
 
                 # TODO: 在SapOrder中记录used的增量
-            attack_prio *= float(np.interp(self.hit_intensity_map[pos_tup], [2.5, 6.0], [1.0, 0.3]))  # 高密度区惩罚
-            self.attack_sap_orders.append(SapOrder(r_pos, attack_prio, 2))
+            if not visible:
+                attack_prio *= float(np.interp(self.hit_intensity_map[pos_tup], [2.5, 6.0], [1.0, 0.3]))  # 高密度区惩罚
+            self.attack_sap_orders.append(
+                SapOrder(r_pos, attack_prio, min(2.0, (vis_enemy_hp / self.sap_cost) if (vis_enemy_hp >= 0) else 100))
+            )
 
         # 累加处于同一位置上的SapOrder的优先级
         self.sap_orders.sort(key=lambda x: (x.target_pos[0], x.target_pos[1], x.priority), reverse=True)  # 位置相同时按优先级降序排列
@@ -965,8 +979,6 @@ class Agent():
                     if np.any(np.all(new_pos == curr_order_pos, axis=1)):
                         continue
                     adjacent_order_mask = utils.square_dist(new_pos, curr_order_pos) == 1
-                    if np.count_nonzero(adjacent_order_mask) == 1:
-                        continue
                     new_orders.append(SapOrder(new_pos, 0.0, np.max(curr_order_hits[adjacent_order_mask])))
             orders.extend(new_orders)
         __create_empty_order(self.sap_orders)
@@ -978,8 +990,10 @@ class Agent():
             for i in range(len(orders)):
                 for j in range(i+1, len(orders)):
                     if utils.square_dist(orders[i].target_pos, orders[j].target_pos) == 1:
-                        delta_priority[i] += self.sap_dropoff * orders[j].priority
-                        delta_priority[j] += self.sap_dropoff * orders[i].priority
+                        i_full = orders[i].need_hit_count <= self.sap_dropoff
+                        j_full = orders[j].need_hit_count <= self.sap_dropoff
+                        delta_priority[i] += (1 if j_full else self.sap_dropoff) * orders[j].priority
+                        delta_priority[j] += (1 if i_full else self.sap_dropoff) * orders[i].priority
             for i in range(len(orders)):
                 orders[i].priority += delta_priority[i]
         __cumulate_priority(self.sap_orders)
@@ -1110,8 +1124,6 @@ class Agent():
         if relic_center_mask.shape[0] == 0:
             return
         base_point: np.ndarray = self.relic_center[np.argmax(relic_center_score)]
-        # potential_points = base_point + np.linspace(-20, 20, 100) * np.array([1, 1])
-        # base_point = potential_points[np.argmin()]
         self.logger.info(f"Base point: {base_point}")
 
         # 创建备选点列表
@@ -1368,7 +1380,7 @@ class Agent():
 
         # 到达过目标点附近, 判断自身是否在得分点附近的敌方视野内
         enemy_in_sight = obs.opp_units_pos[obs.opp_units_mask]
-        enemy_in_sight = enemy_in_sight[utils.square_dist(enemy_in_sight, u_pos) <= self.sensor_range]
+        enemy_in_sight = enemy_in_sight[utils.square_dist(enemy_in_sight, u_pos) <= min(self.sensor_range, self.sap_range)]
         enemy_in_sight_relic = enemy_in_sight[utils.square_dist(enemy_in_sight, rough_target) <= 3]
 
         # 若是, 尝试后退离开视野
