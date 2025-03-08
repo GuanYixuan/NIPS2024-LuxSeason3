@@ -236,6 +236,20 @@ class Agent():
         self.logger.info("Frontline indicator: %.2f, Capture weight: %.2f" % \
                          (self.frontline_indicator, self.capture_weight))
 
+        # 计算danger_map
+        DANGER_MAP_DECAY: float = 0.5 ** (1 / 7)
+        DANGER_DEATH_WEIGHT = (3.0, 2.0, 1.0)
+        self.danger_map *= DANGER_MAP_DECAY
+        for uid in range(C.MAX_UNITS):
+            task = self.task_list[uid]
+            if not obs.my_units_mask[uid] and task.type != UnitTaskType.DEAD and not obs.is_match_start:
+                last_pos = self.history[-1].my_units_pos[uid]
+                coord_list = utils.get_coord_list()
+                sqr_dists = utils.square_dist(last_pos, coord_list)
+                self.danger_map[tuple(coord_list[sqr_dists <= 1.0].T)] += DANGER_DEATH_WEIGHT[0]
+                self.danger_map[tuple(coord_list[sqr_dists == 2.0].T)] += DANGER_DEATH_WEIGHT[1]
+                self.danger_map[tuple(coord_list[sqr_dists == 3.0].T)] += DANGER_DEATH_WEIGHT[2]
+
         # 计算unclustering_cost
         self.unclustering_cost = np.zeros((C.MAP_SIZE, C.MAP_SIZE), dtype=np.float32)
         # for uid in range(C.MAX_UNITS):
@@ -1122,7 +1136,7 @@ class Agent():
         # 根据距离筛选
         dist_thresh = np.zeros(watch_points.shape[0])
         dist_thresh = np.interp(angles,
-            [0, np.pi/8, np.pi/2, np.pi],
+            [0, np.pi/6, np.pi/2, np.pi],
             [24, C.RELIC_SPREAD + self.sap_range + self.sensor_range * 2, max(self.sap_range, 4.0), C.RELIC_SPREAD]
         )
         watch_points = watch_points[utils.square_dist(deltas) <= dist_thresh]
@@ -1204,9 +1218,11 @@ class Agent():
         PREFERRED_DISTANCE = 20 if (obs.step % (C.MAX_STEPS_IN_MATCH + 1) <= 30) else 0
         MAX_POINT_DIST = self.frontline_indicator + 5
         CAPT_RELIC_ENG_WEIGHT = 0.5
-        real_points = np.vstack(np.where(
+        real_points = np.column_stack(np.where(
             (self.relic_map == RelicInfo.REAL.value) & (self.game_map.obstacle_map != Landscape.ASTEROID.value)
-        )).T  # shape (N, 2)
+        ))
+        real_points = real_points[self.danger_map[tuple(real_points.T)] <= 8.0]
+
         dists = np.sum(np.abs(real_points - self.base_pos), axis=1)  # 距离合适的点
         argsort = np.argsort(np.abs(dists - PREFERRED_DISTANCE) -
                              CAPT_RELIC_ENG_WEIGHT * self.game_map.energy_map[real_points[:, 0], real_points[:, 1]])
@@ -1225,7 +1241,8 @@ class Agent():
             dists = np.sum(np.abs(obs.my_units_pos - real_pos), axis=1)
             free_mask = np.array([
                 t.type in (UnitTaskType.IDLE, UnitTaskType.DEFEND, UnitTaskType.EXPLORE, UnitTaskType.ATTACK) and
-                t.priority < 1 for t in self.task_list])
+                ((dists[i] <= 8 and self.danger_map[pos_tuple] <= 6.0) or t.type == UnitTaskType.IDLE) and
+                t.priority < 1 for i, t in enumerate(self.task_list)])
             if not np.any(free_mask):
                 break  # 所有单位都有更高优先级任务
 
@@ -1346,7 +1363,7 @@ class Agent():
             task.data["last_arrival"] = last_arrival
         if last_arrival < 0:
             return [
-                self.__find_path_for(uid, specfic_target, randomness=False, extra_cost=avoid_mask.astype(float) * 10), 0, 0
+                self.__find_path_for(uid, specfic_target, extra_cost=avoid_mask.astype(float) * 10), 0, 0
             ]
 
         # 到达过目标点附近, 判断自身是否在得分点附近的敌方视野内
@@ -1381,7 +1398,7 @@ class Agent():
             return [0, 0, 0]
         # 否则前进一格
         if self.sap_dropoff < 1 or np.random.rand() < 0.2:
-            return [self.__find_path_for(uid, rough_target, randomness=False), 0, 0]
+            return [self.__find_path_for(uid, rough_target), 0, 0]
         return [0, 0, 0]
 
     @staticmethod
@@ -1399,11 +1416,13 @@ class Agent():
         else:
             return 0.05
 
-    def __find_path_for(self, uid: int, target_pos: np.ndarray, randomness: bool = True,
+    def __find_path_for(self, uid: int, target_pos: np.ndarray, danger_weight: float = 0.4,
                         extra_cost: Optional[np.ndarray] = None) -> int:
         """寻找从当前位置到target_pos的路径, 并返回下一步方向"""
         u_energy = self.obs.my_units_energy[uid]
         u_pos = self.obs.my_units_pos[uid]
+        ex_cost = extra_cost if extra_cost is not None else np.zeros((C.MAP_SIZE, C.MAP_SIZE), dtype=np.float32)
+        ex_cost += self.danger_map * danger_weight
         return self.game_map.direction_to(u_pos, target_pos,
                                           self.energy_weight_fn(u_energy, self.game_map.move_cost),
-                                          extra_cost=extra_cost, collision_info=self.unclustering_cost)
+                                          extra_cost=ex_cost, collision_info=self.unclustering_cost)
