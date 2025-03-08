@@ -115,6 +115,11 @@ class Agent():
     base_pos: np.ndarray
     """基地位置"""
     frontline_indicator: float
+    """前线位置指示器"""
+    capture_weight: float
+    """CAPTURE_RELIC任务的权重"""
+    danger_map: np.ndarray
+    """危险地图, 形状(MAP_SIZE, MAP_SIZE)"""
 
     game_map: Map
     """游戏地图"""
@@ -155,7 +160,7 @@ class Agent():
         self.opp_team_id = 1 if self.team_id == 0 else 0
         self.base_pos = np.full(2, 0 if self.team_id == 0 else C.MAP_SIZE-1, dtype=np.int8)
 
-        # np.random.seed(0)
+        np.random.seed(0)
         self.env_cfg = env_cfg
         self.sap_cost = self.env_cfg["unit_sap_cost"]
         self.sap_range = self.env_cfg["unit_sap_range"]
@@ -176,6 +181,8 @@ class Agent():
         # -------------------- 初始化项 --------------------
         if obs.is_match_start:
             self.frontline_indicator = C.MAP_SIZE
+            self.capture_weight = 1.0
+            self.danger_map = np.zeros((C.MAP_SIZE, C.MAP_SIZE), dtype=np.float32)
             self.opp_menory = np.zeros((C.MAX_UNITS, 5), dtype=np.int16)
             self.hit_intensity_map = np.zeros((C.MAP_SIZE, C.MAP_SIZE), dtype=np.float32)
 
@@ -203,20 +210,31 @@ class Agent():
 
         # 计算frontline
         FRONTLINE_DECAY: float = 0.5 ** (1 / 20)
-        MY_UNIT_DEATH_WEIGHT = 0.25
-        ENEMY_UNIT_DEATH_WEIGHT = 0.16
+        FRT_DEATH_WEIGHT = 0.25
+        FRT_OPP_DEATH_WEIGHT = 0.16
         self.frontline_indicator = self.frontline_indicator * FRONTLINE_DECAY + (1 - FRONTLINE_DECAY) * C.MAP_SIZE
         # 根据死亡单位位置更新frontline_indicator
         for uid in range(C.MAX_UNITS):
             task = self.task_list[uid]
             if not obs.my_units_mask[uid] and task.type != UnitTaskType.DEAD and not obs.is_match_start:
                 dist = int(utils.l1_dist(self.history[-1].my_units_pos[uid], self.base_pos))
-                self.frontline_indicator = self.frontline_indicator * (1 - MY_UNIT_DEATH_WEIGHT) + MY_UNIT_DEATH_WEIGHT * dist
+                self.frontline_indicator = self.frontline_indicator * (1 - FRT_DEATH_WEIGHT) + FRT_DEATH_WEIGHT * dist
 
             if obs.opp_units_mask[uid] and obs.opp_units_energy[uid] < 0:
                 dist = int(utils.l1_dist(obs.opp_units_pos[uid], self.base_pos))
-                self.frontline_indicator = self.frontline_indicator * (1 - ENEMY_UNIT_DEATH_WEIGHT) + ENEMY_UNIT_DEATH_WEIGHT * dist
-        self.logger.info(f"Frontline indicator: {self.frontline_indicator}")
+                self.frontline_indicator = self.frontline_indicator * (1 - FRT_OPP_DEATH_WEIGHT) + FRT_OPP_DEATH_WEIGHT * dist
+
+        # 计算capture_weight
+        CAPTURE_WEIGHT_DECAY: float = 0.5 ** (1 / 20)
+        CPT_DEATH_WEIGHT = 0.2
+        self.capture_weight = (1 - CAPTURE_WEIGHT_DECAY) * 1.0 + CAPTURE_WEIGHT_DECAY * self.capture_weight
+        for uid in range(C.MAX_UNITS):
+            task = self.task_list[uid]
+            if not obs.my_units_mask[uid] and task.type == UnitTaskType.CAPTURE_RELIC and not obs.is_match_start:
+                self.capture_weight *= (1 - CPT_DEATH_WEIGHT)
+
+        self.logger.info("Frontline indicator: %.2f, Capture weight: %.2f" % \
+                         (self.frontline_indicator, self.capture_weight))
 
         # 计算unclustering_cost
         self.unclustering_cost = np.zeros((C.MAP_SIZE, C.MAP_SIZE), dtype=np.float32)
@@ -375,14 +393,17 @@ class Agent():
             self.task_list[closest_uid] = UnitTask(UnitTaskType.INVESTIGATE, unknown_pos, step)
 
         # 2. 交替分配DEFEND和CAPTURE_RELIC任务
+        prob_list = np.array([self.capture_weight, 1.0])
+        prob_list /= np.sum(prob_list)
         while True:
-            allocated: bool = False
-            if step % 2 == 0:
-                allocated = (self.__try_allocate_defend(1) + self.__try_allocate_relic(1) > 0)
-            else:
-                allocated = (self.__try_allocate_relic(1) + self.__try_allocate_defend(1) > 0)
-            if not allocated:
-                break
+            choice = np.random.choice(len(prob_list), p=prob_list)
+            try_alloc = [self.__try_allocate_relic, self.__try_allocate_defend][choice]
+            success = try_alloc(1)
+            if not success:
+                prob_list[choice] = 0.0
+                if np.sum(prob_list) == 0:
+                    break
+                prob_list /= np.sum(prob_list)
 
         # 3. 未分配的单位执行EXPLORE任务
         MIN_PRIO = 250 if self.last_relic_observed >= 0 else 40
@@ -410,9 +431,9 @@ class Agent():
 
         # ------------------ 各单位执行各自的任务 --------------------
         MIN_SAP_PRIORITY: Dict[UnitTaskType, float] = {
-            UnitTaskType.CAPTURE_RELIC: 5.5,
+            UnitTaskType.CAPTURE_RELIC: 6.5,
             UnitTaskType.INVESTIGATE: 5.0,
-            UnitTaskType.DEFEND: 5.0,
+            UnitTaskType.DEFEND: 6.0,
             UnitTaskType.ATTACK: 15.0,
             UnitTaskType.EXPLORE: 4.0,
             UnitTaskType.IDLE: 3.0,
@@ -842,7 +863,7 @@ class Agent():
 
             need_hit_count = int(e_energy / self.sap_cost) + 1
             safe_hit_count = need_hit_count + (0 if (self.sap_dropoff == 1 or not enemy_can_move) else 1)
-            self.sap_orders.append(SapOrder(e_pos, priority, min(safe_hit_count, int(priority / 3), 4)))
+            self.sap_orders.append(SapOrder(e_pos, priority, min(safe_hit_count, max(1, int(priority / 3.5)), 4)))
 
         # 针对不在视野内的得分点生成SapOrder
         MAX_LATENCY = 4
@@ -952,8 +973,10 @@ class Agent():
 
         self.sap_orders.sort(reverse=True)
         self.attack_sap_orders.sort(reverse=True)
-        if len(self.sap_orders) > 0: self.logger.info(f"Sap orders: {self.sap_orders}")
-        if len(self.attack_sap_orders) > 0: self.logger.info(f"Attack orders: {self.attack_sap_orders}")
+        print_orders = [order for order in self.sap_orders if order.priority >= 3.0]
+        print_atk_orders = [order for order in self.attack_sap_orders if order.priority >= 2.0]
+        if len(print_orders) > 0: self.logger.info(f"Sap orders: {print_orders}")
+        if len(print_atk_orders) > 0: self.logger.info(f"Attack orders: {print_atk_orders}")
 
     def __pred_enemy_pos(self, eid: int) -> np.ndarray:
         """预测指定id的敌方单位下回合的移动, 下标同C.ADJACENT_DELTAS"""
@@ -1150,7 +1173,7 @@ class Agent():
         allocated_defend_positions: List[Tuple[int, int]] = \
             list([(t.target_pos[0], t.target_pos[1]) for t in self.task_list if t.type == UnitTaskType.DEFEND])
         for i in range(self.watch_points.shape[0]):
-            if len(allocated_defend_positions) >= 6:  # 限制DEFEND数量
+            if len(allocated_defend_positions) >= 12:  # 限制DEFEND数量
                 break
 
             pos = self.watch_points[i, :2].copy().astype(int)
@@ -1201,14 +1224,14 @@ class Agent():
 
             dists = np.sum(np.abs(obs.my_units_pos - real_pos), axis=1)
             free_mask = np.array([
-                t.type in (UnitTaskType.IDLE, UnitTaskType.INVESTIGATE, UnitTaskType.EXPLORE, UnitTaskType.ATTACK) and
+                t.type in (UnitTaskType.IDLE, UnitTaskType.DEFEND, UnitTaskType.EXPLORE, UnitTaskType.ATTACK) and
                 t.priority < 1 for t in self.task_list])
             if not np.any(free_mask):
                 break  # 所有单位都有更高优先级任务
 
             dists[~free_mask] = 10000
             closest_uid = np.argmin(dists)
-            if dists[closest_uid] > 8 and self.task_list[closest_uid].type in (UnitTaskType.ATTACK, UnitTaskType.EXPLORE):
+            if dists[closest_uid] > 8 and self.task_list[closest_uid].type != UnitTaskType.IDLE:
                 continue
             self.task_list[closest_uid] = UnitTask(UnitTaskType.CAPTURE_RELIC, real_pos, obs.step)
 
@@ -1227,7 +1250,9 @@ class Agent():
         allocated_count = 0
         if relic_center_opp.shape[0] > 0:
             for uid in range(C.MAX_UNITS):
-                if self.task_list[uid].type != UnitTaskType.IDLE:
+                if self.task_list[uid].type not in (UnitTaskType.IDLE, UnitTaskType.DEFEND):
+                    continue
+                if obs.my_units_energy[uid] < 175:
                     continue
 
                 tgt = relic_center_opp[np.random.choice(relic_center_opp.shape[0])]
