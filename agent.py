@@ -48,7 +48,7 @@ class UnitTask:
         self.data = {}
 
     def __repr__(self) -> str:
-        return f"UnitTask(type={self.type.name}, target_pos={self.target_pos})"
+        return f"({self.type.name}, {self.target_pos})"
 
     def __str__(self) -> str:
         return f"({self.type.name}, {self.target_pos})"
@@ -328,53 +328,13 @@ class Agent():
             if explore_disabled and self.task_list[uid].type == UnitTaskType.EXPLORE:  # 探索已完成时, 中断当前的探索任务
                 self.task_list[uid].clear()
 
-        # 进行任务交换：相邻的两个单位, 能量较高者执行距离基地更远的任务
-        swapped = np.zeros(C.MAX_UNITS, dtype=bool)
-        for u1 in range(C.MAX_UNITS):
-            u1_task = self.task_list[u1]
-            u1_pos = obs.my_units_pos[u1]
-            u1_energy = obs.my_units_energy[u1]
-            if u1_task.type == UnitTaskType.DEAD or swapped[u1]:
-                continue
-
-            for u2 in range(u1+1, C.MAX_UNITS):
-                u2_task = self.task_list[u2]
-                u2_pos = obs.my_units_pos[u2]
-                u2_energy = obs.my_units_energy[u2]
-                if u2_task.type == UnitTaskType.DEAD or swapped[u2]:
-                    continue
-
-                if abs(u1_energy - u2_energy) <= 40:
-                    continue  # 能量差距过小
-                if utils.l1_dist(u1_pos, u2_pos) > 2:
-                    continue
-
-                # 防止交换后无法到达指定地点
-                u1_on_spot = (u1_task.type == UnitTaskType.CAPTURE_RELIC and np.array_equal(u1_task.target_pos, u1_pos))
-                u2_on_spot = (u2_task.type == UnitTaskType.CAPTURE_RELIC and np.array_equal(u2_task.target_pos, u2_pos))
-                if u1_on_spot and (self.game_map.obstacle_map[tuple(u1_pos)] == Landscape.ASTEROID.value):
-                    continue
-                if u2_on_spot and (self.game_map.obstacle_map[tuple(u2_pos)] == Landscape.ASTEROID.value):
-                    continue
-                if (u1_on_spot or u2_on_spot) and (utils.l1_dist(u1_pos, u2_pos) > 1):
-                    continue  # 避免干扰生产
-
-                delta_tgt_dist = utils.l1_dist(self.base_pos, u1_task.target_pos) - \
-                                 utils.l1_dist(self.base_pos, u2_task.target_pos)
-                if abs(delta_tgt_dist) >= 3 and np.sign(delta_tgt_dist) != np.sign(u1_energy - u2_energy):
-                    swp = u1_task, u2_task
-                    self.task_list[u2], self.task_list[u1] = swp
-                    swapped[u1] = True
-                    swapped[u2] = True
-                    self.logger.info(f"Task swap: {swp[0]} <-> {swp[1]} at {u1_pos}")
-                    break
-
         allocated_unknown_positions: Set[Tuple[int, int]] = \
             set([(t.target_pos[0], t.target_pos[1]) for t in self.task_list if t.type == UnitTaskType.INVESTIGATE])
         allocated_explore_positions: Set[Tuple[int, int]] = \
             set([(t.target_pos[0], t.target_pos[1]) for t in self.task_list if t.type == UnitTaskType.EXPLORE])
 
         actions = np.zeros((C.MAX_UNITS, 3), dtype=int)
+        self.task_swapped = np.zeros(C.MAX_UNITS, dtype=bool)
 
         # 0 高能量单位进攻
         relic_center_opp = self.relic_center[utils.l1_dist(self.relic_center, self.base_pos) > C.MAP_SIZE]
@@ -443,14 +403,54 @@ class Agent():
         # 4. 空闲单位走向较远的遗迹得分点, 不再去重
         self.__try_allocate_attack(99)
 
+        # 进行任务交换：相邻的两个单位, 能量较高者执行距离基地更远的任务
+        for u1 in range(C.MAX_UNITS):
+            u1_task = self.task_list[u1]
+            u1_pos = obs.my_units_pos[u1]
+            u1_energy = obs.my_units_energy[u1]
+            if u1_task.type == UnitTaskType.DEAD or self.task_swapped[u1]:
+                continue
+
+            for u2 in range(u1+1, C.MAX_UNITS):
+                u2_task = self.task_list[u2]
+                u2_pos = obs.my_units_pos[u2]
+                u2_energy = obs.my_units_energy[u2]
+                if u2_task.type == UnitTaskType.DEAD or self.task_swapped[u2]:
+                    continue
+
+                if abs(u1_energy - u2_energy) <= 40:
+                    continue  # 能量差距过小
+                if utils.l1_dist(u1_pos, u2_pos) > 2:
+                    continue
+
+                # 防止交换后无法到达指定地点
+                u1_on_spot = (u1_task.type == UnitTaskType.CAPTURE_RELIC and np.array_equal(u1_task.target_pos, u1_pos))
+                u2_on_spot = (u2_task.type == UnitTaskType.CAPTURE_RELIC and np.array_equal(u2_task.target_pos, u2_pos))
+                if u1_on_spot and (self.game_map.obstacle_map[tuple(u1_pos)] == Landscape.ASTEROID.value):
+                    continue
+                if u2_on_spot and (self.game_map.obstacle_map[tuple(u2_pos)] == Landscape.ASTEROID.value):
+                    continue
+                if (u1_on_spot or u2_on_spot) and (utils.l1_dist(u1_pos, u2_pos) > 1):
+                    continue  # 避免干扰生产
+
+                delta_tgt_dist = utils.l1_dist(self.base_pos, u1_task.target_pos) - \
+                                 utils.l1_dist(self.base_pos, u2_task.target_pos)
+                if abs(delta_tgt_dist) >= 3 and np.sign(delta_tgt_dist) != np.sign(u1_energy - u2_energy):
+                    swp = u1_task, u2_task
+                    self.task_list[u2], self.task_list[u1] = swp
+                    self.task_swapped[u1] = True
+                    self.task_swapped[u2] = True
+                    self.logger.info(f"Task swap: {swp[0]} <-> {swp[1]} at {u1_pos}")
+                    break
+
         # ------------------ 各单位执行各自的任务 --------------------
         MIN_SAP_PRIORITY: Dict[UnitTaskType, float] = {
             UnitTaskType.CAPTURE_RELIC: 6.5,
-            UnitTaskType.INVESTIGATE: 5.0,
-            UnitTaskType.DEFEND: 6.0,
+            UnitTaskType.INVESTIGATE: 7.0,
+            UnitTaskType.DEFEND: 5.5,
             UnitTaskType.ATTACK: 15.0,
-            UnitTaskType.EXPLORE: 4.0,
-            UnitTaskType.IDLE: 3.0,
+            UnitTaskType.EXPLORE: 6.0,
+            UnitTaskType.IDLE: 5.0,
         }
         for uid in range(C.MAX_UNITS):
             task = self.task_list[uid]
@@ -799,8 +799,6 @@ class Agent():
             self.relic_nodes[relic_idx, r_pos_x, r_pos_y] = result
             flipped_pos = utils.flip_coord((r_pos_x, r_pos_y), size=C.RELIC_SPREAD*2+1)
             self.relic_nodes[relic_idx ^ 1, flipped_pos[0], flipped_pos[1]] = result  # 对称地标记
-
-        self.logger.info(f"Relic nodes: \n{self.relic_nodes[0].T}")
         return True
 
     def update_relic_map(self) -> None:
@@ -904,11 +902,11 @@ class Agent():
             for r_pos in real_points_invisible:
                 # 生成普通SapOrder
                 normal_prio = ON_RELIC_WEIGHT * possibility * \
-                    float(np.interp(self.hit_intensity_map[r_pos[0], r_pos[1]], [0.5, 2.0], [1.0, 0.0])) * \
+                    float(np.interp(self.hit_intensity_map[r_pos[0], r_pos[1]], [0.5, 1.5], [1.0, 0.0])) * \
                     float(np.interp(self.game_map.energy_map[r_pos[0], r_pos[1]], [-6, 0], [1.5, 1.0]))
                 self.sap_orders.append(SapOrder(r_pos, normal_prio, 2))
 
-        for r_pos in real_points:
+        for r_pos in real_points[utils.l1_dist(real_points, self.base_pos) <= C.MAP_SIZE]:
             pos_tup = tuple(r_pos)
             visible = obs.sensor_mask[pos_tup]
             # 生成攻击SapOrder
@@ -1218,8 +1216,9 @@ class Agent():
                 break  # 所有单位都有更高优先级任务
 
             dists[~free_mask] = 10000
-            closest_uid = np.argmin(dists)
-            self.task_list[closest_uid] = UnitTask(UnitTaskType.DEFEND, pos, obs.step)
+            closest_uid = int(np.argmin(dists))
+            self.task_list[closest_uid] = UnitTask(UnitTaskType.DEFEND, pos, obs.step, 1 if (obs.match_steps <= 30) else 0)
+            self.__alloc_swap(closest_uid, 10, 75)
 
             allocated_count += 1
             allocated_defend_positions.append((pos[0], pos[1]))
@@ -1260,15 +1259,16 @@ class Agent():
             free_mask = np.array([
                 t.type in (UnitTaskType.IDLE, UnitTaskType.DEFEND, UnitTaskType.EXPLORE, UnitTaskType.ATTACK) and
                 ((dists[i] <= 8 and self.danger_map[pos_tuple] <= 6.0) or t.type == UnitTaskType.IDLE) and
-                t.priority < 1 for i, t in enumerate(self.task_list)])
+                t.priority == 0 for i, t in enumerate(self.task_list)])
             if not np.any(free_mask):
                 break  # 所有单位都有更高优先级任务
 
             dists[~free_mask] = 10000
-            closest_uid = np.argmin(dists)
+            closest_uid = int(np.argmin(dists))
             if dists[closest_uid] > 8 and self.task_list[closest_uid].type != UnitTaskType.IDLE:
                 continue
             self.task_list[closest_uid] = UnitTask(UnitTaskType.CAPTURE_RELIC, real_pos, obs.step)
+            self.__alloc_swap(closest_uid, 3, 50)
 
             allocated_count += 1
             allocated_real_positions.add(pos_tuple)
@@ -1292,11 +1292,41 @@ class Agent():
 
                 tgt = relic_center_opp[np.random.choice(relic_center_opp.shape[0])]
                 self.task_list[uid] = UnitTask(UnitTaskType.ATTACK, tgt, obs.step)
+                self.__alloc_swap(uid, 10, 150)
+
                 allocated_count += 1
                 if allocated_count >= count:
                     return allocated_count
 
         return allocated_count
+
+    def __alloc_swap(self, uid: int, max_dist: int, min_energy: int) -> None:
+        """为uid根据能量等进行任务置换"""
+        obs = self.obs
+        task = self.task_list[uid]
+        unit_task_targets = np.array([t.target_pos for t in self.task_list])
+
+        target_front_dist = utils.l1_dist(task.target_pos, self.base_pos)
+        potential_target_mask = obs.my_units_mask & (obs.my_units_energy >= min_energy) & (~self.task_swapped)
+        potential_target_mask &= np.array([t.type == task.type or t.type == UnitTaskType.IDLE for t in self.task_list])
+        potential_target_mask &= utils.l1_dist(unit_task_targets, self.base_pos) < target_front_dist
+        potential_target_mask &= (utils.l1_dist(obs.my_units_pos, task.target_pos) <= max_dist)
+
+        if task.type == UnitTaskType.CAPTURE_RELIC:
+            potential_target_mask &= (np.any(unit_task_targets != obs.my_units_pos, axis=-1) |
+                                      (self.game_map.obstacle_map[tuple(obs.my_units_pos.T)] != Landscape.ASTEROID.value))
+
+        if not np.any(potential_target_mask):
+            return
+
+        ids = np.where(potential_target_mask)[0]
+        potential_target = ids[np.argmax(obs.my_units_energy[ids])]
+        swp = task, self.task_list[potential_target]
+        self.task_list[potential_target], self.task_list[uid] = swp
+        self.task_swapped[potential_target] = True
+        self.logger.info(f"Swap task {uid} with {potential_target}: {swp}")
+
+        self.__alloc_swap(uid, max_dist, min_energy)
 
     def __conduct_attack(self, uid: int) -> List[int]:
         """执行攻击任务"""
@@ -1400,7 +1430,7 @@ class Agent():
         elif u_energy >= self.sap_cost:
             MIN_PRIO = float(np.interp(u_energy,
                                        [self.sap_cost + 10, self.sap_cost * 2, self.sap_cost * 4, self.sap_cost * 6],
-                                       [7.0, 4.5, 2.0, 1.0]))
+                                       [7.0, 4.0, 3.0, 2.0]))
             self.logger.info(f"Unit {uid} (eng {obs.my_units_energy[uid]}) finding sap with priority {MIN_PRIO}")
             for order in self.attack_sap_orders:
                 if order.priority < MIN_PRIO:
@@ -1423,16 +1453,9 @@ class Agent():
     def energy_weight_fn(energy: int, move_cost: int) -> float:
         steps = energy // move_cost
 
-        if energy < 25:
-            return 10
-        elif energy < 100 or steps < 20:
-            return 0.3
-        elif energy < 250:
-            return 0.2
-        elif energy < 350:
-            return 0.10
-        else:
-            return 0.05
+        ret = float(np.interp(energy, [25, 30, 100, 250, 350], [5, 0.3, 0.20, 0.15, 0.05]))
+        ret = max(ret, 3.0 if steps <= 6 else 0)
+        return ret
 
     def __find_path_for(self, uid: int, target_pos: np.ndarray, danger_weight: float = 0.4,
                         extra_cost: Optional[np.ndarray] = None) -> int:
