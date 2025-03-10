@@ -118,6 +118,8 @@ class Agent():
     """前线位置指示器"""
     capture_weight: float
     """CAPTURE_RELIC任务的权重"""
+    full_attack: bool
+    """全面进攻模式"""
     danger_map: np.ndarray
     """危险地图, 形状(MAP_SIZE, MAP_SIZE)"""
 
@@ -182,6 +184,7 @@ class Agent():
         if obs.is_match_start:
             self.frontline_indicator = C.MAP_SIZE
             self.capture_weight = 1.0
+            self.full_attack = False
             self.danger_map = np.zeros((C.MAP_SIZE, C.MAP_SIZE), dtype=np.float32)
             self.opp_menory = np.zeros((C.MAX_UNITS, 5), dtype=np.int16)
             self.hit_intensity_map = np.zeros((C.MAP_SIZE, C.MAP_SIZE), dtype=np.float32)
@@ -273,6 +276,18 @@ class Agent():
                 self.opp_menory[uid] = (-1, -1, -1, 0, 0)
             else:
                 self.opp_menory[uid] = (obs.opp_units_pos[uid, 0], obs.opp_units_pos[uid, 1], obs.opp_units_energy[uid], 0, 0)
+
+        # 更新full_attack
+        if obs.match_steps >= 60 and obs.team_points[self.team_id] < obs.team_points[self.opp_team_id]:
+            # defend任务随机分配到敌方基地
+            if not self.full_attack:
+                self.full_attack = True
+                for uid in range(C.MAX_UNITS):
+                    if task.type == UnitTaskType.DEFEND:
+                        task.clear()
+
+                self.__try_allocate_defend(99)
+                self.logger.info(f"Enter full attack mode")
 
         # -------------------- 任务分配预处理 --------------------
 
@@ -1192,6 +1207,26 @@ class Agent():
     def __try_allocate_defend(self, count: int) -> int:
         """尝试分配count个防御任务"""
         obs = self.obs
+        allocated_count = 0
+
+        if self.full_attack:
+            real_points = np.column_stack(np.where(
+                (self.relic_map == RelicInfo.REAL.value) & (self.game_map.obstacle_map != Landscape.ASTEROID.value)
+            ))
+            real_points = real_points[utils.l1_dist(real_points, self.base_pos) >= C.MAP_SIZE]
+            if real_points.shape[0] == 0:
+                return allocated_count
+
+            for uid in range(C.MAX_UNITS):
+                task = self.task_list[uid]
+                if task.type == UnitTaskType.IDLE:
+                    self.task_list[uid] = UnitTask(UnitTaskType.DEFEND,
+                                                   real_points[np.random.randint(real_points.shape[0])],
+                                                   obs.step, 1)
+                    allocated_count += 1
+                    if allocated_count >= count:
+                        return allocated_count
+            return allocated_count
 
         # 根据到基地距离排序前哨点
         PREFERRED_DISTANCE = C.MAP_SIZE if (obs.match_steps <= 30) else self.frontline_indicator - 5
@@ -1199,7 +1234,7 @@ class Agent():
             dists = np.abs(utils.l1_dist(self.watch_points[:, :2], self.base_pos) - PREFERRED_DISTANCE)
             self.watch_points = self.watch_points[np.argsort(dists)]
 
-        allocated_count = 0
+
         allocated_defend_positions: List[Tuple[int, int]] = \
             list([(t.target_pos[0], t.target_pos[1]) for t in self.task_list if t.type == UnitTaskType.DEFEND])
         for i in range(self.watch_points.shape[0]):
