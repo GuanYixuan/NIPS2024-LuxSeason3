@@ -319,7 +319,7 @@ class Agent():
             task = self.task_list[uid]
             u_selector = (self.team_id, uid)
             if not obs.units_mask[u_selector] and task.type != UnitTaskType.DEAD:  # 死亡单位不做任何动作
-                self.logger.info(f"Unit {uid} is dead")
+                self.logger.info(f"U{uid} is dead")
                 self.task_list[uid] = UnitTask(UnitTaskType.DEAD, np.zeros(2, dtype=np.int8), step)
                 continue
             elif obs.units_mask[u_selector] and self.task_list[uid].type == UnitTaskType.DEAD:  # 新出现的单位等待重新分配任务
@@ -460,7 +460,7 @@ class Agent():
             if task.type == UnitTaskType.DEAD:
                 continue
 
-            self.logger.info(f"Unit {uid} (eng {u_energy}) -> {task.type.name} {task.target_pos} {task.data}")
+            self.logger.info(f"U{uid} ({u_energy}) -> {task.type.name} {task.target_pos} {task.data}")
 
             # 若相邻格有比自己能量低的敌方单位, 则直接走向敌方
             action_decided = False
@@ -474,10 +474,10 @@ class Agent():
                 total_energy = np.sum(obs.opp_units_energy[enemy_mask])
                 if total_energy < curr_pos_energy - np.count_nonzero(curr_pos_units_mask) * self.game_map.move_cost:
                     actions[uid] = [i+1, 0, 0]
-                    self.logger.info(f"Unit {uid} -> crash {enemy_pos}")
+                    self.logger.info(f"U{uid} -> crash {enemy_pos}")
                 else:
                     actions[uid] = [(i^2)+1, 0, 0]
-                    self.logger.info(f"Unit {uid} -> avoid {enemy_pos}")
+                    self.logger.info(f"U{uid} -> avoid {enemy_pos}")
                 action_decided = True
                 break
             if action_decided:
@@ -507,7 +507,7 @@ class Agent():
                                 sap.fulfilled_count += 1
                             elif sq_dist == 1:
                                 sap.fulfilled_count += self.sap_dropoff
-                        self.logger.info(f"Unit {uid} -> sap {sap_target}")
+                        self.logger.info(f"U{uid} -> sap {sap_target}")
                         continue
 
             # CAPTURE_RELIC任务: 直接走向对应目标
@@ -529,10 +529,10 @@ class Agent():
                     actions[uid] = [self.__find_path_for(uid, task.target_pos), 0, 0]
 
                 if self.relic_map[tuple(task.target_pos)] != RelicInfo.UNKNOWN.value:
-                    self.logger.info(f"Unit {uid} complete INVESTIGATE task")
+                    self.logger.info(f"U{uid} complete INVESTIGATE")
                     task.clear()
                 if step > first_arrival + 20:  # 任务自动结束
-                    self.logger.info(f"Unit {uid} ends INVESTIGATE task")
+                    self.logger.info(f"U{uid} ends INVESTIGATE")
                     task.clear()
 
             # EXPLORE任务: 移动到指定点
@@ -563,7 +563,7 @@ class Agent():
                             best_target = e_pos
                 if best_target is not None:
                     actions[uid] = [self.__find_path_for(uid, best_target), 0, 0]
-                    self.logger.info(f"Unit {uid} -> chasing {best_target}")
+                    self.logger.info(f"U{uid} -> chasing {best_target}")
 
                 if np.array_equal(u_pos, task.target_pos):
                     # TODO: 随机移动
@@ -572,11 +572,11 @@ class Agent():
                     actions[uid] = [self.__find_path_for(uid, task.target_pos), 0, 0]
 
                 if np.all(utils.square_dist(task.target_pos, self.watch_points[:, :2]) > 1):
-                    self.logger.info(f"Unit {uid}'s watch point {task.target_pos} is no longer valid")
+                    self.logger.info(f"U{uid}'s watch {task.target_pos} invalid")
                     task.clear()
                     continue
                 if self.game_map.full_energy_map[tuple(task.target_pos)] <= 3:
-                    self.logger.info(f"Unit {uid}'s watch point {task.target_pos} is no longer valid")
+                    self.logger.info(f"U{uid}'s watch {task.target_pos} invalid")
                     task.clear()
                     continue
 
@@ -1107,7 +1107,7 @@ class Agent():
             self.logger.debug(f"Predict enemy {eid} direction after energy modifications: {dir_scores}")
 
         dir_scores /= np.sum(dir_scores)  # 归一化
-        self.logger.info(f"Predict enemy {eid} direction: {dir_scores}")
+        self.logger.debug(f"Predict enemy {eid} direction: {dir_scores}")
         return dir_scores
 
     watch_points: np.ndarray  # 前哨点列表, shape (N, 3)
@@ -1240,9 +1240,11 @@ class Agent():
         ))
         real_points = real_points[self.danger_map[tuple(real_points.T)] <= 8.0]
 
-        dists = np.sum(np.abs(real_points - self.base_pos), axis=1)  # 距离合适的点
+        dists = np.sum(np.abs(real_points - self.base_pos), axis=1)
+        near_score = np.where(dists <= 14, 100, 0)
         argsort = np.argsort(np.abs(dists - PREFERRED_DISTANCE) -
-                             CAPT_RELIC_ENG_WEIGHT * self.game_map.energy_map[real_points[:, 0], real_points[:, 1]])
+                             CAPT_RELIC_ENG_WEIGHT * self.game_map.energy_map[real_points[:, 0], real_points[:, 1]] -
+                             near_score)
         dists = dists[argsort]
         real_points = real_points[argsort]  # 按到基地距离和能量排序
         real_points_near = real_points[dists <= MAX_POINT_DIST]
@@ -1268,7 +1270,8 @@ class Agent():
             if dists[closest_uid] > 8 and self.task_list[closest_uid].type != UnitTaskType.IDLE:
                 continue
             self.task_list[closest_uid] = UnitTask(UnitTaskType.CAPTURE_RELIC, real_pos, obs.step)
-            self.__alloc_swap(closest_uid, 3, 50)
+            if self.danger_map[pos_tuple] <= 3.0:
+                self.__alloc_swap(closest_uid, 3, 50)
 
             allocated_count += 1
             allocated_real_positions.add(pos_tuple)
@@ -1368,7 +1371,7 @@ class Agent():
             # 选出所有“与real_points中所有点距离大于等于sensor_range, 但至少与一点距离等于sensor_range”的点
             valid_points = utils.get_coord_list()
             dists = np.max(np.abs(valid_points.reshape(-1, 1, 2) - real_points.reshape(1, -1, 2)), axis=-1)
-            valid_points = valid_points[np.min(dists, axis=-1) == self.sensor_range]
+            valid_points = valid_points[np.min(dists, axis=-1) == max(self.sensor_range, self.sap_range)]
             # 与现有点对比去除临近点
             if len(allocated_pos) > 0:
                 dists = np.max(np.abs(valid_points.reshape(-1, 1, 2) - np.array(allocated_pos).reshape(1, -1, 2)), axis=-1)
@@ -1396,9 +1399,8 @@ class Agent():
             # 选择最优点作为目标
             if valid_points.shape[0] > 0:
                 task.data[TARGET_KEY] = valid_points[0]
-                self.logger.info(f"Unit {uid} (eng {obs.my_units_energy[uid]}) selected target {task.data[TARGET_KEY]}")
             else:
-                self.logger.info(f"Unit {uid} (eng {obs.my_units_energy[uid]}) has no valid target")
+                self.logger.info(f"U{uid} ({obs.my_units_energy[uid]}) has no valid target")
                 task.clear()
                 return [0, 0, 0]
 
@@ -1406,7 +1408,7 @@ class Agent():
 
         # 若未曾到达目标点附近, 继续行进
         last_arrival = task.data.get("last_arrival", -1)
-        if utils.square_dist(u_pos, specfic_target) <= 1:
+        if utils.square_dist(u_pos, specfic_target) <= 2:
             last_arrival = obs.step
             task.data["last_arrival"] = last_arrival
         if last_arrival < 0:
@@ -1430,8 +1432,8 @@ class Agent():
         elif u_energy >= self.sap_cost:
             MIN_PRIO = float(np.interp(u_energy,
                                        [self.sap_cost + 10, self.sap_cost * 2, self.sap_cost * 4, self.sap_cost * 6],
-                                       [7.0, 4.0, 3.0, 2.0]))
-            self.logger.info(f"Unit {uid} (eng {obs.my_units_energy[uid]}) finding sap with priority {MIN_PRIO}")
+                                       [7.0, 4.0, 2.5, 2.0]))
+            self.logger.info(f"U{uid} ({obs.my_units_energy[uid]}) finding sap with priority {MIN_PRIO}")
             for order in self.attack_sap_orders:
                 if order.priority < MIN_PRIO:
                     break
